@@ -115,8 +115,21 @@ however that target expects; the bot itself is just a long-poll process with no 
 ## Commands
 
 - `/start` — greet, confirm the bot is up.
-- `/new` — clear the rolling session (`run/session`); the next message starts a fresh
-  `claude` conversation with no prior turn history.
+- `/new` — clear this chat's rolling session (`run/session-<chat_id>`); the next message
+  starts a fresh `claude` conversation with no prior history.
+
+## Groups
+
+By default the bot only serves the owner in DM. To let a group use it:
+
+1. Add the bot to the group.
+2. @-mention it once — it replies with that group's `id`.
+3. Put the id in `.env`'s `ALLOWED_GROUP_IDS` (comma-separated for several) and restart.
+
+In a group the bot only responds when @-mentioned or replied to (it stays quiet in normal
+chatter), each chat keeps its own `claude` session, and group messages are tagged with the
+sender's name so `claude` knows who's talking. Note: anyone who can address the bot in an
+allow-listed group can drive `claude` on the host — only add groups whose members you trust.
 
 ## Extending
 
