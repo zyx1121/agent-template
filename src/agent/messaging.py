@@ -1,10 +1,13 @@
-#!/usr/bin/env python3
-"""Telegram sender: renders GFM-ish markdown to Telegram HTML, falls back to plain text if
-the HTML send fails, and chunks messages over the 4096-char limit. The rendering handles
-the fiddly parts (code spans, fences straddling a chunk split) so it doesn't drift.
+"""Outbound Telegram sender: renders GFM-ish markdown to Telegram HTML, falls back to plain
+text if the HTML send fails, and chunks messages over the 4096-char limit. The rendering
+handles the fiddly parts (code spans, fences straddling a chunk split) so it doesn't drift.
 
-CLI: `tg_send.py <chat_id>` with the message on stdin (token from TELEGRAM_BOT_TOKEN).
-Importable: `from tg_send import send_telegram, send_telegram_file, md_to_html`.
+Deliberately hand-rolled on urllib (no `requests`) and fully synchronous, so it can be
+called from `asyncio.to_thread` inside a turn without dragging in an async HTTP client. The
+live progress bubble, which runs in the async context, uses PTB's bot API directly instead.
+
+CLI: `python -m agent.messaging <chat_id>` with the message on stdin (token from
+TELEGRAM_BOT_TOKEN). Importable: `from agent.messaging import send_message, send_file`.
 """
 import html
 import json
@@ -52,7 +55,7 @@ def _note_error(method, exc):
         last_error = f"{method} HTTP {exc.code}: {body}"
     else:
         last_error = f"{method}: {type(exc).__name__}: {exc}"
-    print(f"tg_send: {last_error}", file=sys.stderr)
+    print(f"messaging: {last_error}", file=sys.stderr)
 
 
 def _post(token, method, params):
@@ -91,7 +94,8 @@ def _chunks(text, size=3500):
     return out
 
 
-def send_telegram(token, chat_id, text) -> bool:
+def send_message(token, chat_id, text) -> bool:
+    """Send a text message (chunked + markdown-rendered, plain-text fallback per chunk)."""
     if not (token and chat_id and text):
         return False
     ok_all = True
@@ -105,7 +109,7 @@ def send_telegram(token, chat_id, text) -> bool:
     return ok_all
 
 
-def send_telegram_file(token, chat_id, path, caption="") -> bool:
+def send_file(token, chat_id, path, caption="") -> bool:
     """Upload a local file to the chat via sendDocument (hand-rolled multipart — the venv
     has no requests). Caption is sent as plain text, truncated to Telegram's 1024 limit."""
     if not (token and chat_id):
@@ -152,5 +156,5 @@ def send_telegram_file(token, chat_id, path, caption="") -> bool:
 
 if __name__ == "__main__":
     chat = sys.argv[1] if len(sys.argv) > 1 else ""
-    ok = send_telegram(os.environ.get("TELEGRAM_BOT_TOKEN", ""), chat, sys.stdin.read())
+    ok = send_message(os.environ.get("TELEGRAM_BOT_TOKEN", ""), chat, sys.stdin.read())
     sys.exit(0 if ok else 1)

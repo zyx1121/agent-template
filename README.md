@@ -1,9 +1,9 @@
 # agent-template
 
 Minimal Telegram ↔ Claude Code bridge: one owner, one bot, one rolling `claude -p`
-conversation. Long-polling only (no webhook, no open port), single-user (only
-`OWNER_USER_ID` is served), single process (`bot.py`). This repo is a **GitHub
-template** — fork it, swap the persona, deploy.
+conversation. Long-polling only (no webhook, no open port), **single-owner** (the owner is
+always served; allow-listed groups are opt-in), single process (`python -m agent`). This repo
+is a **GitHub template** — fork it, swap the persona, deploy.
 
 ## How this template is meant to be used
 
@@ -14,9 +14,25 @@ per target anyway.
 
 The intended flow: hand this repo to a coding agent (Claude Code, etc.) and say *"open
 me a new agent from this template."* The sections below double as a **runbook for that
-agent** — it drives the mechanical parts (fork, edit `AGENT.md`, fill `.env`, run the
+agent** — it drives the mechanical parts (fork, edit `SOUL.md`, fill `.env`, run the
 deploy) and pauses for the parts only a human can do (approve the bot in @BotFather,
 run `claude setup-token` in a browser).
+
+## Project layout
+
+```
+pyproject.toml       project metadata + the single dependency (python-telegram-bot)
+SOUL.md              the persona — the ONLY file you change to make a different agent
+.env                 secrets + config (copied from .env.example, gitignored)
+src/agent/
+  config.py          Settings dataclass + env parsing, in one place
+  messaging.py       outbound Telegram sender + markdown→HTML rendering (sync, urllib)
+  claude.py          one streaming `claude -p` turn + the live progress bubble
+  handlers.py        Telegram handlers, access control, app wiring / entrypoint
+  __main__.py        `python -m agent`
+tests/               pure-function characterization tests (no network, no token)
+deploy/              systemd unit + idempotent install script
+```
 
 ## Open a new agent
 
@@ -28,17 +44,17 @@ run `claude setup-token` in a browser).
    (Replace `<owner>/agent-template` with this template's actual `owner/repo` once it's pushed
    to GitHub.)
 
-2. **Write the persona.** Edit `AGENT.md` — it's the *only* file you're expected to
+2. **Write the persona.** Edit `SOUL.md` — it's the *only* file you're expected to
    change to make this a different agent. Everything under "你是 / 語氣 / 你會做的事 /
    你不會做的事" gets injected as the Claude system prompt on every turn
-   (`claude -p --append-system-prompt "$(cat AGENT.md)"`). `bot.py` / `tg_send.py` stay as-is.
+   (`claude -p --append-system-prompt "$(cat SOUL.md)"`). The `src/agent/` package stays as-is.
 
 3. **Get a Telegram bot token.** Talk to [@BotFather](https://t.me/BotFather),
    `/newbot`, copy the token → `TELEGRAM_BOT_TOKEN`.
 
 4. **Get your Telegram user id.** Talk to [@userinfobot](https://t.me/userinfobot) →
-   `OWNER_USER_ID`. Only messages from this id are served; everyone else is logged and
-   ignored.
+   `OWNER_USER_ID`. This id is the trust anchor — always served, in DM or any group. Everyone
+   else is ignored unless they're in an allow-listed group (see **Groups** below).
 
 5. **Get a Claude Code OAuth token.** On any machine with a browser and the `claude`
    CLI logged in:
@@ -57,22 +73,32 @@ run `claude setup-token` in a browser).
    `CLAUDE_CODE_OAUTH_TOKEN`. Optional (defaults shown): `AGENT_NAME=Agent` (display
    name), `CLAUDE_BIN=~/.local/bin/claude` (path to the `claude` CLI),
    `AGENT_TURN_TIMEOUT=1800` (seconds before a turn is killed), `AGENT_HOME` (defaults
-   to this repo's directory — only needed if you run `bot.py` from elsewhere).
+   to this repo's directory — only needed if you run the bot from elsewhere).
 
 ## Run it locally
 
-Requires Python 3.10+ and the [`claude` CLI](https://docs.claude.com/en/docs/claude-code)
-installed and logged in (or `CLAUDE_CODE_OAUTH_TOKEN` set, per above).
+Requires the [`claude` CLI](https://docs.claude.com/en/docs/claude-code) installed and logged
+in (or `CLAUDE_CODE_OAUTH_TOKEN` set, per above), plus [uv](https://docs.astral.sh/uv/):
 
 ```
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python bot.py
+uv run python -m agent
 ```
 
-`bot.py` auto-loads `.env` from `AGENT_HOME` on startup (a minimal loader, not
-`python-dotenv` — already-set env vars always win), so this is the entire local flow.
-Message your bot on Telegram; it replies via a resumed `claude -p` session.
+`uv` creates the virtualenv and installs the dependency on first run (Python 3.10+). The bot
+auto-loads `.env` from `AGENT_HOME` on startup (a minimal loader, not `python-dotenv` —
+already-set env vars always win), so this is the entire local flow. Message your bot on
+Telegram; it replies via a resumed `claude -p` session.
+
+Without uv, a plain venv works too — `pip install .` then `python -m agent`.
+
+## Tests
+
+The fiddly pure functions (markdown→HTML rendering, message chunking, env parsing) have
+characterization tests that run with no network and no bot token:
+
+```
+uv run python -m unittest discover -s tests
+```
 
 ## Run it on a VM / LXC (systemd, always-on)
 
@@ -84,7 +110,8 @@ bash deploy/install.sh
 
 This is idempotent — safe to re-run after `git pull` to pick up code changes. It:
 
-- creates `.venv/` and installs `requirements.txt` if missing
+- creates `.venv/` and installs the project + dependency (via `uv sync`, or a `pip install`
+  fallback if uv isn't present)
 - checks `.env` exists (fails fast with instructions if not — see step 6 above)
 - warns if the `claude` CLI isn't found at `CLAUDE_BIN` / on `PATH`
 - renders `deploy/agent.service` (a template — placeholders `__REPO_DIR__`,
@@ -109,7 +136,7 @@ If you'd rather hand-install the unit yourself instead of running the script, co
 manually, then `systemctl daemon-reload && systemctl enable --now <name>.service`.
 
 Any Linux host with systemd works (a VM, a container, a cloud box). For other setups —
-macOS launchd, a container platform, a process manager — wrap `.venv/bin/python bot.py`
+macOS launchd, a container platform, a process manager — wrap `.venv/bin/python -m agent`
 however that target expects; the bot itself is just a long-poll process with no open port.
 
 If the bot runs as **root** (e.g. a bare LXC container), `claude` refuses

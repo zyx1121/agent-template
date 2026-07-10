@@ -11,7 +11,7 @@ User=__RUN_USER__
 Group=__RUN_USER__
 WorkingDirectory=__REPO_DIR__
 EnvironmentFile=__REPO_DIR__/.env
-ExecStart=__REPO_DIR__/.venv/bin/python bot.py
+ExecStart=__REPO_DIR__/.venv/bin/python -m agent
 Restart=always
 RestartSec=5
 
