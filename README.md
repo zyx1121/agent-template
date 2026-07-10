@@ -112,6 +112,10 @@ Any Linux host with systemd works (a VM, a container, a cloud box). For other se
 macOS launchd, a container platform, a process manager — wrap `.venv/bin/python bot.py`
 however that target expects; the bot itself is just a long-poll process with no open port.
 
+If the bot runs as **root** (e.g. a bare LXC container), `claude` refuses
+`--permission-mode bypassPermissions` for safety — add `IS_SANDBOX=1` to `.env` to allow it
+inside a sandboxed container. Running as a non-root user avoids this entirely (recommended).
+
 ## Commands
 
 - `/start` — greet, confirm the bot is up.
@@ -131,9 +135,12 @@ chatter), each chat keeps its own `claude` session, and group messages are tagge
 sender's name so `claude` knows who's talking. Note: anyone who can address the bot in an
 allow-listed group can drive `claude` on the host — only add groups whose members you trust.
 
-## Extending
+## What's built in
 
-This skeleton is **text-only** — `on_media` in `bot.py` just replies "目前這個骨架只收
-文字訊息" for photos/voice/documents/etc. To wire media in: in `on_media`, download the
-Telegram file to a local path, then build the prompt with that path so `claude -p` can
-open it with its own file tools — same turn model as text, just with a download step first.
+- **Media in** — photos / documents / voice / etc. are downloaded to `run/telegram/…` and
+  their local path is passed into the prompt, so `claude` reads the file with its own tools.
+- **Files out** — anything `claude` drops in `run/outbox/` is sent back to the chat at the end
+  of the turn (failed sends are kept and reported, never silently lost).
+- **Live progress** — one Telegram message updates in place with each tool `claude` runs
+  (`📖 Read`, `⚡️ Bash …`, `📝 Edit`), so a long turn visibly shows what it's doing.
+- **Reactions** — a random emoji acks receipt, overwritten with 👍 / 👎 when the turn ends.

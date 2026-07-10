@@ -13,16 +13,19 @@ Anyone who can address the bot in an allow-listed group can drive claude on this
 the allow-list to groups whose members you trust with that.
 """
 import asyncio
+import html
 import json
 import logging
 import os
 import random
 import re
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from telegram import BotCommand, ReactionTypeEmoji, Update
-from telegram.constants import ChatAction, ChatType
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -31,7 +34,7 @@ from telegram.ext import (
     filters,
 )
 
-from tg_send import send_telegram
+from tg_send import send_telegram, send_telegram_file
 
 HOME = Path(os.environ.get("AGENT_HOME") or Path(__file__).resolve().parent)
 
@@ -65,6 +68,10 @@ TURN_TIMEOUT = int(os.environ.get("AGENT_TURN_TIMEOUT", "1800"))
 PERSONA = HOME / "AGENT.md"
 RUN = HOME / "run"
 RUN.mkdir(exist_ok=True)
+OUTBOX = RUN / "outbox"  # claude drops files here to have them sent back this turn
+OUTBOX.mkdir(exist_ok=True)
+TG_ATTACH_ROOT = RUN / "telegram"  # downloaded inbound attachments
+TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Telegram Bot API getFile download cap
 # Groups allowed to use the bot: comma-separated chat ids (always negative). Empty = owner-only.
 def _parse_group_ids(raw: str) -> set:
     """Skip malformed entries (no crash on a bad env value) and non-negative ids — group /
@@ -100,34 +107,149 @@ def _session_file(chat_id: int) -> Path:
     return RUN / f"session-{chat_id}"
 
 
-def run_claude(prompt: str, chat_id: int) -> str:
-    """Run ONE claude turn (blocking — call via asyncio.to_thread). Returns reply text.
-    Persona via --append-system-prompt; per-chat rolling session via --resume. Retries once
-    with a fresh session if a stale/expired session id fails to resume."""
+def _tool_line(name: str, inp) -> str:
+    """One step-log line for a tool_use block (mirrors noir's claude-stream-progress.py)."""
+    inp = inp if isinstance(inp, dict) else {}
+    if name == "Bash":
+        cmd = " ".join((inp.get("command") or "").split())
+        return f"⚡️ {cmd[:130]}"
+    if name in ("Edit", "Write", "NotebookEdit"):
+        return f"📝 {name} {inp.get('file_path', '')}"
+    if name == "Read":
+        return f"📖 {inp.get('file_path', '')}"
+    if name.startswith("mcp__"):
+        return f"🔧 {name[len('mcp__'):].replace('__', '.')}"
+    return f"🔧 {name}"
+
+
+class _ProgressBubble:
+    """One live-updating Telegram message showing the tool steps of an in-flight claude turn —
+    the progress-bubble equivalent of noir's claude-stream-progress.py, via PTB's bot API
+    instead of hand-rolled urllib. Cosmetic: any Telegram API hiccup here must never break
+    the turn itself."""
+
+    _MAX_STEPS = 15
+    _THROTTLE = 3.0
+
+    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+        self._context = context
+        self._chat_id = chat_id
+        self._steps: list = []
+        self._msg_id = None
+        self._sends = 0
+        self._last_edit = 0.0
+        self._last_text = ""
+
+    def _render(self) -> str:
+        return "\n".join(f"<code>{html.escape(s)}</code>" for s in self._steps[-self._MAX_STEPS:])
+
+    async def add(self, line: str) -> None:
+        self._steps.append(line[:140])
+        await self._flush()
+
+    async def _flush(self, force: bool = False) -> None:
+        if not self._steps:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_edit < self._THROTTLE:
+            return
+        text = self._render()
+        if text == self._last_text:
+            return
+        try:
+            if self._msg_id is None:
+                if self._sends >= 2:  # an unconfirmed send may have landed; one resend, then quiet
+                    return
+                self._sends += 1
+                sent = await self._context.bot.send_message(
+                    chat_id=self._chat_id, text=text, parse_mode=ParseMode.HTML)
+                self._msg_id = sent.message_id
+            else:
+                await self._context.bot.edit_message_text(
+                    chat_id=self._chat_id, message_id=self._msg_id, text=text, parse_mode=ParseMode.HTML)
+            self._last_edit = now
+            self._last_text = text
+        except Exception as e:
+            log.warning("progress bubble flush failed: %s", e)
+
+    async def finish(self) -> None:
+        await self._flush(force=True)
+
+
+async def run_claude(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Run ONE claude turn as an async streaming subprocess. Returns reply text, relaying
+    tool-use steps to a live-updating Telegram "progress bubble" as they happen (replaces the
+    old typing-indicator — the bubble itself is the alive signal). Persona via
+    --append-system-prompt; per-chat rolling session via --resume. Retries once with a fresh
+    session if a stale/expired session id fails to resume."""
     persona = PERSONA.read_text() if PERSONA.exists() else ""
     sf = _session_file(chat_id)
+    bubble = _ProgressBubble(context, chat_id)
 
-    def _invoke(sid: str) -> subprocess.CompletedProcess:
-        cmd = [CLAUDE_BIN, "-p", prompt, "--output-format", "json",
+    async def _invoke(sid: str):
+        cmd = [CLAUDE_BIN, "-p", prompt,
+               "--output-format", "stream-json", "--include-partial-messages", "--verbose",
                "--permission-mode", "bypassPermissions"]
         if persona.strip():
             cmd += ["--append-system-prompt", persona]
         if sid:
             cmd += ["--resume", sid]
-        return subprocess.run(cmd, cwd=str(HOME), capture_output=True, text=True, timeout=TURN_TIMEOUT)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(HOME),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            # stream-json emits one JSON object per line; a big result / tool_use event easily
+            # exceeds asyncio's default 64 KiB StreamReader line limit ("chunk is longer than
+            # limit"). Raise it well past any realistic single event.
+            limit=16 * 1024 * 1024)
+        result_event = None
+        try:
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                if ev.get("type") == "assistant":
+                    for block in (ev.get("message", {}).get("content") or []):
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = block.get("name", "")
+                            # StructuredOutput is the --json-schema turn-output mechanism, not
+                            # a work step.
+                            if name == "StructuredOutput":
+                                continue
+                            await bubble.add(_tool_line(name, block.get("input")))
+                elif ev.get("type") == "result":
+                    result_event = ev
+            stderr = (await proc.stderr.read()).decode("utf-8", "replace")
+            returncode = await proc.wait()
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
+        return returncode, result_event, stderr
+
+    async def _invoke_timed(sid: str):
+        try:
+            return await asyncio.wait_for(_invoke(sid), timeout=TURN_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise subprocess.TimeoutExpired(CLAUDE_BIN, TURN_TIMEOUT)
 
     sid = sf.read_text().strip() if sf.exists() else ""
-    proc = _invoke(sid)
-    if proc.returncode != 0 and sid and re.search(r"no (conversation|rollout) found", proc.stderr, re.I):
+    returncode, result_event, stderr = await _invoke_timed(sid)
+    if returncode != 0 and sid and re.search(r"no (conversation|rollout) found", stderr, re.I):
         sf.unlink(missing_ok=True)  # stale session — start fresh
-        proc = _invoke("")
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip()[:500] or f"claude exited {proc.returncode}")
-    data = json.loads(proc.stdout)
-    new_sid = data.get("session_id", "")
+        returncode, result_event, stderr = await _invoke_timed("")
+    await bubble.finish()
+    if returncode != 0:
+        raise RuntimeError(stderr.strip()[:500] or f"claude exited {returncode}")
+    if result_event is None:
+        raise RuntimeError("claude stream ended without a result event")
+    new_sid = result_event.get("session_id", "")
     if new_sid:
         sf.write_text(new_sid)
-    return data.get("result") or "(claude 回了空訊息)"
+    return result_event.get("result") or "(claude 回了空訊息)"
 
 
 async def _set_reaction(msg, emoji: str) -> None:
@@ -137,22 +259,9 @@ async def _set_reaction(msg, emoji: str) -> None:
         log.warning("set_reaction failed: %s", e)
 
 
-async def _keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Re-send the typing indicator every 4s (Telegram clears it after ~5s). Cancelled when
-    the turn finishes."""
-    try:
-        while True:
-            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-            await asyncio.sleep(4)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:  # cosmetic; never let it break the turn
-        log.warning("typing failed: %s", e)
-
-
 def _addressed_to_bot(msg, bot_username: str, bot_id: int) -> bool:
-    """In a group, only act when the bot is explicitly addressed: @-mentioned, or the message
-    is a reply to one of the bot's own messages."""
+    """In a group, only act when the bot is explicitly addressed: @-mentioned (in the text OR
+    a media caption), or the message is a reply to one of the bot's own messages."""
     r = msg.reply_to_message
     if r and r.from_user and r.from_user.id == bot_id:
         return True
@@ -162,11 +271,110 @@ def _addressed_to_bot(msg, bot_username: str, bot_id: int) -> bool:
         # breaks when the message contains emoji/astral chars, silently missing a real mention.
         if e.type == "mention" and msg.parse_entity(e).lower() == handle:
             return True
+    for e in (msg.caption_entities or []):
+        if e.type == "mention" and msg.parse_caption_entity(e).lower() == handle:
+            return True
     return False
 
 
 def _strip_mention(text: str, bot_username: str) -> str:
     return re.sub(rf"@{re.escape(bot_username)}\b", "", text, flags=re.I).strip()
+
+
+def _group_prompt(user, text: str, bot_username: str) -> str:
+    sender = (user.full_name if user else "") or (user.username if user else "") or "someone"
+    return f"[{sender}]: {_strip_mention(text, bot_username)}"
+
+
+def _safe_name(name, fallback):
+    name = (name or "").replace("\x00", "").strip()
+    name = re.sub(r"[^\w.\- ]", "_", name).strip("._ ")
+    return (name or fallback)[:120]
+
+
+def _resolve_attachment(msg):
+    """The message's primary downloadable file as (file_id, filename, size, kind), or None.
+    One file per Telegram message — albums arrive as separate updates."""
+    if msg.document:
+        d = msg.document
+        return d.file_id, _safe_name(d.file_name, f"file_{d.file_unique_id}"), d.file_size, "文件"
+    if msg.photo:
+        p = msg.photo[-1]  # largest rendition
+        return p.file_id, f"photo_{p.file_unique_id}.jpg", p.file_size, "圖片"
+    if msg.voice:
+        v = msg.voice
+        return v.file_id, f"voice_{v.file_unique_id}.ogg", v.file_size, "語音"
+    if msg.audio:
+        a = msg.audio
+        return a.file_id, _safe_name(a.file_name, f"audio_{a.file_unique_id}.mp3"), a.file_size, "音訊"
+    if msg.video:
+        v = msg.video
+        return v.file_id, _safe_name(v.file_name, f"video_{v.file_unique_id}.mp4"), v.file_size, "影片"
+    if msg.animation:
+        a = msg.animation
+        return a.file_id, _safe_name(a.file_name, f"anim_{a.file_unique_id}.mp4"), a.file_size, "動圖"
+    if msg.video_note:
+        v = msg.video_note
+        return v.file_id, f"videonote_{v.file_unique_id}.mp4", v.file_size, "視訊留言"
+    if msg.sticker:
+        s = msg.sticker
+        return s.file_id, f"sticker_{s.file_unique_id}.webp", s.file_size, "貼圖"
+    return None
+
+
+def _clear_outbox() -> None:
+    """Blocking — call via asyncio.to_thread. Wipes stale outbox contents before a turn so a
+    file left over from a crashed prior turn never gets (re)sent."""
+    OUTBOX.mkdir(exist_ok=True)
+    for p in OUTBOX.iterdir():
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+
+
+def _flush_outbox(chat_id: int) -> list:
+    """Blocking — call via asyncio.to_thread. Sends everything claude dropped in the outbox
+    during the just-finished turn. A file that fails to send is KEPT (not silently lost) and its
+    name returned so the caller can tell the user. Serialized by _lock, so the outbox's contents
+    belong entirely to the turn that just ran."""
+    if not OUTBOX.exists():
+        return []
+    failed = []
+    for p in sorted(OUTBOX.iterdir()):
+        if not p.is_file():
+            continue
+        if send_telegram_file(TOKEN, chat_id, str(p)):
+            p.unlink(missing_ok=True)
+        else:
+            failed.append(p.name)
+            log.warning("outbox: failed to send %s — kept for retry", p.name)
+    return failed
+
+
+async def _run_turn(msg, chat, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
+    """One claude turn end-to-end: ack reaction, streamed run (live progress bubble) + reply,
+    drain any files claude dropped in OUTBOX, outcome reaction. Shared by on_message and
+    on_media so the turn lifecycle lives in exactly one place."""
+    async with _lock:  # serialize turns
+        await _set_reaction(msg, random.choice(REACTIONS))  # "got it" ack
+        ok = True
+        await asyncio.to_thread(_clear_outbox)  # drop stale files from a crashed prior turn
+        try:
+            reply = await run_claude(prompt, chat.id, context)  # streams progress bubble as it runs
+        except subprocess.TimeoutExpired:
+            reply = f"⚠️ claude 逾時({TURN_TIMEOUT}s)"
+            ok = False
+        except Exception as e:
+            log.exception("claude turn failed")
+            reply = f"⚠️ claude 失敗:{e}"
+            ok = False
+        await asyncio.to_thread(send_telegram, TOKEN, chat.id, reply)
+        failed = await asyncio.to_thread(_flush_outbox, chat.id)
+        if failed:
+            await asyncio.to_thread(send_telegram, TOKEN, chat.id,
+                                    f"⚠️ {len(failed)} 個附件沒送成功(保留在 outbox,可稍後重試):{', '.join(failed)}")
+        await _set_reaction(msg, "👍" if ok else "👎")  # overwrite the ack with the outcome
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -190,29 +398,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return  # allow-listed group, but not addressed to the bot — stay quiet
 
     text = msg.text or ""
-    if is_group:
-        sender = (user.full_name if user else "") or (user.username if user else "") or "someone"
-        prompt = f"[{sender}]: {_strip_mention(text, context.bot.username)}"
-    else:
-        prompt = text
-
-    async with _lock:  # serialize turns
-        await _set_reaction(msg, random.choice(REACTIONS))  # "got it" ack
-        typing = asyncio.create_task(_keep_typing(context, chat.id))
-        ok = True
-        try:
-            reply = await asyncio.to_thread(run_claude, prompt, chat.id)
-        except subprocess.TimeoutExpired:
-            reply = f"⚠️ claude 逾時({TURN_TIMEOUT}s)"
-            ok = False
-        except Exception as e:
-            log.exception("claude turn failed")
-            reply = f"⚠️ claude 失敗:{e}"
-            ok = False
-        finally:
-            typing.cancel()
-        await asyncio.to_thread(send_telegram, TOKEN, chat.id, reply)
-        await _set_reaction(msg, "👍" if ok else "👎")  # overwrite the ack with the outcome
+    prompt = _group_prompt(user, text, context.bot.username) if is_group else text
+    await _run_turn(msg, chat, context, prompt)
 
 
 async def on_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -234,11 +421,57 @@ async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Text-only skeleton. Stay silent on group media (avoid noise); only answer in DM. See
-    # README「擴充」for wiring media (download the file, pass its local path) through claude.
-    if update.effective_chat.type != ChatType.PRIVATE:
+    # A file/photo/voice/etc.: download it so claude can actually open it, then run a turn
+    # whose prompt = caption (the task) + the saved path. Group gate mirrors on_message
+    # (same allow-list + @-mention check); media doesn't get the owner group-id-probe hint
+    # since that's a text-only discovery aid.
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = msg.from_user
+    is_group = chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+    if is_group:
+        if chat.id not in ALLOWED_GROUPS:
+            return
+        if not _addressed_to_bot(msg, context.bot.username, context.bot.id):
+            return  # allow-listed group, but not addressed to the bot — stay quiet
+
+    caption = (msg.caption or "").strip()
+    resolved = _resolve_attachment(msg)
+    if resolved is None:
+        # location / contact / poll / dice … nothing downloadable
+        if caption:
+            prompt = _group_prompt(user, caption, context.bot.username) if is_group else caption
+            await _run_turn(msg, chat, context, prompt)
+            return
+        await msg.reply_text("這則訊息我抓不到內容(沒有可下載的檔案)。")
         return
-    await update.effective_message.reply_text("目前這個骨架只收文字訊息。")
+
+    file_id, fname, size, kind = resolved
+    if size and size > TG_DOWNLOAD_LIMIT:
+        await msg.reply_text(f"📎 {fname} 太大({size // 1024 // 1024} MB)— Telegram bot 最多下載 20 MB。")
+        return
+
+    dest_dir = TG_ATTACH_ROOT / f"{int(time.time())}-{chat.id}"
+    path = dest_dir / fname
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        tgfile = await context.bot.get_file(file_id)  # raises if >20 MB even when size was None
+        await tgfile.download_to_drive(str(path))
+        path.chmod(0o600)
+    except Exception as e:
+        log.error("download failed: %s", e)
+        await msg.reply_text(f"⚠️ 檔案下載失敗:{e}")
+        return
+
+    kb = path.stat().st_size // 1024
+    head = caption if caption else "使用者傳了一個檔案,看內容並判斷要不要動作。"
+    if caption and is_group:
+        head = _group_prompt(user, caption, context.bot.username)
+    prompt = (
+        f"{head}\n\n--- 附件 ({kind}) ---\n{fname} ({kb} KB) → {path}\n"
+        "(檔案已存到上面路徑,要看就讀檔/解析 — 圖片、文件、音訊用你的工具開。)"
+    )
+    await _run_turn(msg, chat, context, prompt)
 
 
 async def on_unauthorized(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

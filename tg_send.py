@@ -4,7 +4,7 @@ the HTML send fails, and chunks messages over the 4096-char limit. The rendering
 the fiddly parts (code spans, fences straddling a chunk split) so it doesn't drift.
 
 CLI: `tg_send.py <chat_id>` with the message on stdin (token from TELEGRAM_BOT_TOKEN).
-Importable: `from tg_send import send_telegram, md_to_html`.
+Importable: `from tg_send import send_telegram, send_telegram_file, md_to_html`.
 """
 import html
 import json
@@ -103,6 +103,51 @@ def send_telegram(token, chat_id, text) -> bool:
             r = _post(token, "sendMessage", {"chat_id": chat_id, "text": chunk})  # plain fallback
             ok_all = ok_all and bool(r and r.get("ok"))
     return ok_all
+
+
+def send_telegram_file(token, chat_id, path, caption="") -> bool:
+    """Upload a local file to the chat via sendDocument (hand-rolled multipart — the venv
+    has no requests). Caption is sent as plain text, truncated to Telegram's 1024 limit."""
+    if not (token and chat_id):
+        return False
+    try:
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError:
+        return False
+    import uuid
+    fname = re.sub(r'[\r\n"]', "_", os.path.basename(path)) or "file.bin"
+    if caption:
+        caption = caption.encode("utf-16-le")[:2048].decode("utf-16-le", "ignore")
+
+    def _upload(cap):
+        boundary = "tgagent" + uuid.uuid4().hex
+        fields = {"chat_id": str(chat_id)}
+        if cap:
+            fields["caption"] = cap
+        body = b""
+        for k, v in fields.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                     f'name="{k}"\r\n\r\n{v}\r\n').encode()
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f'name="document"; filename="{fname}"\r\n'
+                 "Content-Type: application/octet-stream\r\n\r\n").encode()
+        body += blob + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return bool(json.loads(r.read()).get("ok"))
+        except Exception as e:
+            _note_error("sendDocument", e)
+            return False
+
+    if _upload(caption):
+        return True
+    return bool(caption) and _upload("")
 
 
 if __name__ == "__main__":
