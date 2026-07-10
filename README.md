@@ -5,6 +5,19 @@ conversation. Long-polling only (no webhook, no open port), single-user (only
 `OWNER_USER_ID` is served), single process (`bot.py`). This repo is a **GitHub
 template** — fork it, swap the persona, deploy.
 
+## How this template is meant to be used
+
+There's deliberately no `create-agent` CLI or skill. Spinning up a new agent is a
+handful of one-off steps — fork, write a persona, collect three tokens, deploy — that
+don't recur often enough to justify freezing into a tool, and the deploy step differs
+per target anyway.
+
+The intended flow: hand this repo to a coding agent (Claude Code, etc.) and say *"open
+me a new agent from this template."* The sections below double as a **runbook for that
+agent** — it drives the mechanical parts (fork, edit `AGENT.md`, fill `.env`, run the
+deploy) and pauses for the parts only a human can do (approve the bot in @BotFather,
+run `claude setup-token` in a browser).
+
 ## Open a new agent
 
 1. **Fork from the template.**
@@ -94,6 +107,16 @@ sudo journalctl -u <service-name> -f
 If you'd rather hand-install the unit yourself instead of running the script, copy
 `deploy/agent.service`, replace `__REPO_DIR__` / `__RUN_USER__` / `__AGENT_NAME__`
 manually, then `systemctl daemon-reload && systemctl enable --now <name>.service`.
+
+## Deploy targets
+
+- **PVE VM / LXC (systemd)** — `deploy/install.sh` runs unmodified; the proven path
+  (same shape as the Noir agent). Recommended.
+- **Local (foreground)** — `python bot.py` as above; fine for testing. No persistent
+  launchd setup is shipped — add a plist yourself if you want it resident on macOS.
+- **keel (git-driven CD)** — not supported as-is: keel requires an HTTP port + health
+  endpoint and this is a portless long-poll process, so keel would health-check fail and
+  auto-roll-back. Would need a `/healthz` stub in `bot.py` first.
 
 ## Commands
 
