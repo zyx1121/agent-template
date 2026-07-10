@@ -12,11 +12,12 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 from pathlib import Path
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, ReactionTypeEmoji, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
@@ -94,6 +95,18 @@ def run_claude(prompt: str) -> str:
     return data.get("result") or "(claude 回了空訊息)"
 
 
+# "got it" ack reactions (from Telegram's allowed bot set); a random one is set when a message
+# arrives, then overwritten with the outcome (👍/👎) when the turn ends.
+REACTIONS = ["👍", "🔥", "🎉", "👀", "🤔", "🙏", "💯", "⚡", "🤩", "👌", "🫡", "✍️", "🤝", "👏", "🤓"]
+
+
+async def _set_reaction(msg, emoji: str) -> None:
+    try:
+        await msg.set_reaction(reaction=[ReactionTypeEmoji(emoji=emoji)])
+    except Exception as e:  # reactions can be unavailable (older chats / API hiccup); non-fatal
+        log.warning("set_reaction failed: %s", e)
+
+
 async def _keep_typing(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     """Re-send the typing indicator every 4s (Telegram clears it after ~5s) so a long turn
     feels responsive. Cancelled when the turn finishes."""
@@ -113,17 +126,22 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     msg = update.effective_message
     chat_id = update.effective_chat.id
     async with _lock:  # serialize turns
+        await _set_reaction(msg, random.choice(REACTIONS))  # "got it" ack
         typing = asyncio.create_task(_keep_typing(context, chat_id))
+        ok = True
         try:
             reply = await asyncio.to_thread(run_claude, msg.text or "")
         except subprocess.TimeoutExpired:
             reply = f"⚠️ claude 逾時({TURN_TIMEOUT}s)"
+            ok = False
         except Exception as e:
             log.exception("claude turn failed")
             reply = f"⚠️ claude 失敗:{e}"
+            ok = False
         finally:
             typing.cancel()
         await asyncio.to_thread(send_telegram, TOKEN, chat_id, reply)
+        await _set_reaction(msg, "👍" if ok else "👎")  # overwrite the ack with the outcome
 
 
 async def on_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
