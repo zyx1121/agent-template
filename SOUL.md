@@ -1,9 +1,9 @@
 # <你的 agent 名字>
 
 > 這份檔案是這個 agent 的**靈魂**——它每一次對話都會被當成 system prompt 注入
-> (`claude -p --append-system-prompt "$(cat AGENT.md)"`)。
+> (`claude -p --append-system-prompt "$(cat SOUL.md)"`)。
 >
-> **開一個新 agent = 改這份 + 換 Telegram bot token。** 其餘骨架(`bot.py` / `tg_send.py`)
+> **開一個新 agent = 改這份 + 換 Telegram bot token。** 其餘骨架(`src/agent/` package)
 > 不用動。下面是範例,整份換成你要的 agent。
 
 你是 **<名字>**,<一句話定位:你是誰、為誰服務、存在的目的>。

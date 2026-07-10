@@ -11,13 +11,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-[ -f "$REPO_DIR/bot.py" ] || { echo "!!! $REPO_DIR/bot.py not found — deploy/install.sh must live in <repo>/deploy/"; exit 1; }
+[ -f "$REPO_DIR/pyproject.toml" ] || { echo "!!! $REPO_DIR/pyproject.toml not found — deploy/install.sh must live in <repo>/deploy/"; exit 1; }
 command -v python3 >/dev/null || { echo "!!! python3 not found — install it first"; exit 1; }
 
-# venv: bot.py runs via .venv/bin/python (see ExecStart in deploy/agent.service), and
-# .venv/ is gitignored — without this a fresh clone has nothing to execute.
-[ -d "$REPO_DIR/.venv" ] || python3 -m venv "$REPO_DIR/.venv"
-"$REPO_DIR/.venv/bin/pip" install -q -r "$REPO_DIR/requirements.txt"
+# venv: the bot runs via `.venv/bin/python -m agent` (see ExecStart in deploy/agent.service),
+# and .venv/ is gitignored — without this a fresh clone has nothing to execute. Prefer uv
+# (fast, respects uv.lock); fall back to stdlib venv + a pip install of the project itself,
+# which works because pyproject.toml is a standard PEP 621 build. --no-editable so the unit
+# runs the installed package, not a path-dependent editable shim.
+if command -v uv >/dev/null; then
+  (cd "$REPO_DIR" && uv sync --no-editable)
+else
+  [ -d "$REPO_DIR/.venv" ] || python3 -m venv "$REPO_DIR/.venv"
+  "$REPO_DIR/.venv/bin/pip" install -q "$REPO_DIR"
+fi
 
 # .env is required at systemd load time (EnvironmentFile=, no leading '-'): fail fast with
 # a clear pointer instead of installing a unit that will crash-loop on missing env vars.
@@ -28,7 +35,7 @@ if [ ! -f "$REPO_DIR/.env" ]; then
   exit 1
 fi
 
-# claude CLI: bot.py shells out to it every turn. Non-fatal — CLAUDE_BIN in .env may point
+# claude CLI: the bot shells out to it every turn. Non-fatal — CLAUDE_BIN in .env may point
 # elsewhere on this box — but worth flagging before the service starts crash-looping.
 CLAUDE_BIN_DEFAULT="$HOME/.local/bin/claude"
 CLAUDE_BIN_CFG="$(grep -E '^CLAUDE_BIN=' "$REPO_DIR/.env" 2>/dev/null | cut -d= -f2- || true)"
