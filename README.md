@@ -76,7 +76,7 @@ Message your bot on Telegram; it replies via a resumed `claude -p` session.
 
 ## Run it on a VM / LXC (systemd, always-on)
 
-For a PVE VM or keel LXC where the bot should survive reboots and crash-restart:
+For a Linux host with systemd where the bot should survive reboots and crash-restart:
 
 ```
 bash deploy/install.sh

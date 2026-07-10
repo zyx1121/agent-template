@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Telegram sender: renders GFM-ish markdown to Telegram HTML, falls back to plain text if
-the HTML send fails, and chunks messages over the 4096-char limit. Lifted from Noir's
-tg_send.py (the parts a text bridge needs) so the rendering is already battle-tested.
+the HTML send fails, and chunks messages over the 4096-char limit. The rendering handles
+the fiddly parts (code spans, fences straddling a chunk split) so it doesn't drift.
 
 CLI: `tg_send.py <chat_id>` with the message on stdin (token from TELEGRAM_BOT_TOKEN).
 Importable: `from tg_send import send_telegram, md_to_html`.

@@ -144,8 +144,8 @@ async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # This skeleton is text-only. See README「擴充」for wiring media (download → path in prompt)
-    # through claude — Noir's telegram-bot.py on_media is the reference.
+    # This skeleton is text-only. See README「擴充」for wiring media (download the file,
+    # pass its local path into the prompt) through claude.
     await update.effective_message.reply_text("目前這個骨架只收文字訊息。")
 
 
