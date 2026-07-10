@@ -108,15 +108,9 @@ If you'd rather hand-install the unit yourself instead of running the script, co
 `deploy/agent.service`, replace `__REPO_DIR__` / `__RUN_USER__` / `__AGENT_NAME__`
 manually, then `systemctl daemon-reload && systemctl enable --now <name>.service`.
 
-## Deploy targets
-
-- **PVE VM / LXC (systemd)** — `deploy/install.sh` runs unmodified; the proven path
-  (same shape as the Noir agent). Recommended.
-- **Local (foreground)** — `python bot.py` as above; fine for testing. No persistent
-  launchd setup is shipped — add a plist yourself if you want it resident on macOS.
-- **keel (git-driven CD)** — not supported as-is: keel requires an HTTP port + health
-  endpoint and this is a portless long-poll process, so keel would health-check fail and
-  auto-roll-back. Would need a `/healthz` stub in `bot.py` first.
+Any Linux host with systemd works (a VM, a container, a cloud box). For other setups —
+macOS launchd, a container platform, a process manager — wrap `.venv/bin/python bot.py`
+however that target expects; the bot itself is just a long-poll process with no open port.
 
 ## Commands
 
@@ -127,8 +121,6 @@ manually, then `systemctl daemon-reload && systemctl enable --now <name>.service
 ## Extending
 
 This skeleton is **text-only** — `on_media` in `bot.py` just replies "目前這個骨架只收
-文字訊息" for photos/voice/documents/etc. To wire media in (download the Telegram file,
-pass its local path into the prompt, let `claude -p` read it with its own tools), use
-Noir's `telegram-bot.py` `on_media` handler as the reference implementation — same
-`python-telegram-bot` stack, same `claude -p --resume` turn model, just with a download
-step before the prompt is built.
+文字訊息" for photos/voice/documents/etc. To wire media in: in `on_media`, download the
+Telegram file to a local path, then build the prompt with that path so `claude -p` can
+open it with its own file tools — same turn model as text, just with a download step first.
