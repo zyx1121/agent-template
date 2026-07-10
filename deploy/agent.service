@@ -1,0 +1,19 @@
+[Unit]
+Description=__AGENT_NAME__ — Telegram bot (single-user long-poll bridge)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_USER__
+WorkingDirectory=__REPO_DIR__
+EnvironmentFile=__REPO_DIR__/.env
+ExecStart=__REPO_DIR__/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
