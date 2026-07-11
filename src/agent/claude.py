@@ -2,8 +2,10 @@
 
 `run_turn` spawns claude as an async subprocess (stream-json), relays each tool_use block to
 a single in-place-updating Telegram message ("progress bubble") as it happens, and returns
-the final reply text. Persona via --append-system-prompt (SOUL.md); per-chat rolling session
-via --resume, retried once with a fresh session if a stale id fails to resume.
+the final reply text (plus the bubble's message id, for a caller that wants to delete it —
+see NO_REPLY_SENTINEL / is_no_reply below). Persona via --append-system-prompt (SOUL.md);
+per-chat rolling session via --resume, retried once with a fresh session if a stale id fails
+to resume.
 
 Every turn also gets a *builtin* `schedule` MCP server (agent.mcp_schedule) — the only
 sanctioned way claude creates persistent reminders/scheduled tasks, since claude's built-in
@@ -30,6 +32,11 @@ from agent.config import Settings
 
 log = logging.getLogger("agent.claude")
 
+# The magic reply that silences a *scheduled* turn (see is_no_reply / SCHEDULING_NOTE below).
+# handlers.py only honors this on the schedule-fired path — a real user turn always replies,
+# even if claude emits this token literally.
+NO_REPLY_SENTINEL = "NO_REPLY"
+
 # Appended after the persona (or standalone if the persona is empty — a fork with no SOUL.md
 # still must not use CronCreate) on every turn. Keeps "how to schedule" out of SOUL.md, which
 # is the one file a fork is expected to touch — this instruction has to survive every fork
@@ -42,8 +49,22 @@ SCHEDULING_NOTE = (
     "unaffected by this conversation ending. Never use the built-in CronCreate / CronList — "
     "those only live in this session's own memory, scoped to this single `claude -p` "
     "invocation; the moment this turn ends they evaporate and will never actually fire. Also "
-    "never set up an OS-level cron / at / systemd timer yourself."
+    "never set up an OS-level cron / at / systemd timer yourself.\n\n"
+    "Silent-monitoring rule: this only applies when the CURRENT turn is itself a scheduled "
+    "firing (its prompt starts with '[schedule fired ...]') — for a monitoring-style schedule "
+    "where most checks find nothing worth reporting, reply with exactly the single token "
+    f"{NO_REPLY_SENTINEL} (nothing else in the message, no extra words or punctuation) and the "
+    "chat stays completely silent for this run. This sentinel is recognized ONLY on a scheduled "
+    "firing; in a normal conversation with a person, always reply normally — never send "
+    f"{NO_REPLY_SENTINEL} to a user."
 )
+
+
+def is_no_reply(reply: str) -> bool:
+    """True iff `reply` is nothing but the NO_REPLY sentinel — the whole message, after
+    stripping surrounding whitespace, must match exactly (case-sensitive). A reply that merely
+    mentions the token, or wraps it in other words, is a normal reply and must still be sent."""
+    return reply.strip() == NO_REPLY_SENTINEL
 
 
 def _build_mcp_config(settings: Settings, chat_id: int) -> dict:
@@ -101,6 +122,13 @@ class ProgressBubble:
         self._last_edit = 0.0
         self._last_text = ""
 
+    @property
+    def message_id(self) -> int | None:
+        """The bubble's Telegram message id, or None if it never actually sent (e.g. a turn
+        with zero tool calls). Exposed so a caller can delete it after the turn — used by the
+        scheduled-firing NO_REPLY path (see handlers._delete_progress_bubble)."""
+        return self._msg_id
+
     def _render(self) -> str:
         return "\n".join(f"<code>{html.escape(s)}</code>" for s in self._steps[-self._MAX_STEPS:])
 
@@ -137,10 +165,12 @@ class ProgressBubble:
         await self._flush(force=True)
 
 
-async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings) -> str:
-    """Run ONE claude turn as an async streaming subprocess. Returns reply text, relaying
-    tool-use steps to a live-updating progress bubble as they happen. Retries once with a
-    fresh session if a stale/expired session id fails to resume."""
+async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings) -> tuple[str, int | None]:
+    """Run ONE claude turn as an async streaming subprocess. Returns (reply text, progress
+    bubble message id) — the bubble id lets a caller delete it afterward (the scheduled-firing
+    NO_REPLY path does; every other caller just ignores it), relaying tool-use steps to a
+    live-updating progress bubble as they happen. Retries once with a fresh session if a
+    stale/expired session id fails to resume."""
     persona = settings.soul_file.read_text() if settings.soul_file.exists() else ""
     system_prompt = f"{persona.strip()}\n\n{SCHEDULING_NOTE}" if persona.strip() else SCHEDULING_NOTE
     sf = settings.session_file(chat_id)
@@ -222,4 +252,5 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
     new_sid = result_event.get("session_id", "")
     if new_sid:
         sf.write_text(new_sid)
-    return result_event.get("result") or "(claude returned an empty message)"
+    reply = result_event.get("result") or "(claude returned an empty message)"
+    return reply, bubble.message_id
