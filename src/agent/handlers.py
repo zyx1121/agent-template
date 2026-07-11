@@ -100,28 +100,28 @@ def _resolve_attachment(msg):
     One file per Telegram message — albums arrive as separate updates."""
     if msg.document:
         d = msg.document
-        return d.file_id, safe_name(d.file_name, f"file_{d.file_unique_id}"), d.file_size, "文件"
+        return d.file_id, safe_name(d.file_name, f"file_{d.file_unique_id}"), d.file_size, "document"
     if msg.photo:
         p = msg.photo[-1]  # largest rendition
-        return p.file_id, f"photo_{p.file_unique_id}.jpg", p.file_size, "圖片"
+        return p.file_id, f"photo_{p.file_unique_id}.jpg", p.file_size, "photo"
     if msg.voice:
         v = msg.voice
-        return v.file_id, f"voice_{v.file_unique_id}.ogg", v.file_size, "語音"
+        return v.file_id, f"voice_{v.file_unique_id}.ogg", v.file_size, "voice"
     if msg.audio:
         a = msg.audio
-        return a.file_id, safe_name(a.file_name, f"audio_{a.file_unique_id}.mp3"), a.file_size, "音訊"
+        return a.file_id, safe_name(a.file_name, f"audio_{a.file_unique_id}.mp3"), a.file_size, "audio"
     if msg.video:
         v = msg.video
-        return v.file_id, safe_name(v.file_name, f"video_{v.file_unique_id}.mp4"), v.file_size, "影片"
+        return v.file_id, safe_name(v.file_name, f"video_{v.file_unique_id}.mp4"), v.file_size, "video"
     if msg.animation:
         a = msg.animation
-        return a.file_id, safe_name(a.file_name, f"anim_{a.file_unique_id}.mp4"), a.file_size, "動圖"
+        return a.file_id, safe_name(a.file_name, f"anim_{a.file_unique_id}.mp4"), a.file_size, "animation"
     if msg.video_note:
         v = msg.video_note
-        return v.file_id, f"videonote_{v.file_unique_id}.mp4", v.file_size, "視訊留言"
+        return v.file_id, f"videonote_{v.file_unique_id}.mp4", v.file_size, "video note"
     if msg.sticker:
         s = msg.sticker
-        return s.file_id, f"sticker_{s.file_unique_id}.webp", s.file_size, "貼圖"
+        return s.file_id, f"sticker_{s.file_unique_id}.webp", s.file_size, "sticker"
     return None
 
 
@@ -168,17 +168,17 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     try:
         reply = await run_turn(prompt, chat_id, context, settings)  # streams progress bubble
     except subprocess.TimeoutExpired:
-        reply = f"⚠️ claude 逾時({settings.turn_timeout}s)"
+        reply = f"⚠️ claude timed out ({settings.turn_timeout}s)"
         ok = False
     except Exception as e:
         log.exception("claude turn failed")
-        reply = f"⚠️ claude 失敗:{e}"
+        reply = f"⚠️ claude failed: {e}"
         ok = False
     await asyncio.to_thread(send_message, settings.token, chat_id, reply)
     failed = await asyncio.to_thread(_flush_outbox, settings, chat_id)
     if failed:
         await asyncio.to_thread(send_message, settings.token, chat_id,
-                                f"⚠️ {len(failed)} 個附件沒送成功(保留在 outbox,可稍後重試):{', '.join(failed)}")
+                                f"⚠️ {len(failed)} attachment(s) failed to send (kept in outbox, retry later): {', '.join(failed)}")
     return ok
 
 
@@ -206,9 +206,9 @@ def _minute_floor(dt: datetime) -> datetime:
 
 
 def _schedule_prompt(sched: dict, fired_at: datetime) -> str:
-    note = sched.get("note") or "(無)"
+    note = sched.get("note") or "(none)"
     return (
-        f"[排程觸發 id={sched['id']} note={note} time={fired_at.strftime('%Y-%m-%d %H:%M')}]\n"
+        f"[schedule fired id={sched['id']} note={note} time={fired_at.strftime('%Y-%m-%d %H:%M')}]\n"
         f"{sched['prompt']}"
     )
 
@@ -277,8 +277,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             # this is the owner probing for the group id to add to the allow-list.
             if user and user.id == settings.owner_id and _addressed_to_bot(msg, context.bot.username, context.bot.id):
                 await msg.reply_text(
-                    f"這個群組還沒授權。group id = {chat.id}\n"
-                    "填進 .env 的 ALLOWED_GROUP_IDS 再 restart 就能用。"
+                    f"This group isn't authorized yet. group id = {chat.id}\n"
+                    "Add it to ALLOWED_GROUP_IDS in .env and restart to enable it."
                 )
             return
         if not _addressed_to_bot(msg, context.bot.username, context.bot.id):
@@ -292,13 +292,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def on_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = _settings(context)
     settings.session_file(update.effective_chat.id).unlink(missing_ok=True)  # fresh session for THIS chat
-    await update.effective_message.reply_text("🆕 開了新對話(清掉這個 chat 的 session 記憶)。")
+    await update.effective_message.reply_text("🆕 Started a new conversation (cleared this chat's session memory).")
 
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings = _settings(context)
     await update.effective_message.reply_text(
-        f"{settings.agent_name} 上線。傳訊息給我就是一次對話。\n/new 開新對話。"
+        f"{settings.agent_name} is online. Message me to start a conversation.\n/new starts a fresh one."
     )
 
 
@@ -306,7 +306,7 @@ async def on_unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Only in DM — in a group an unrecognized command isn't ours to answer (avoid noise).
     if update.effective_chat.type != ChatType.PRIVATE:
         return
-    await update.effective_message.reply_text("未知指令。可用:/new(開新對話)、/start。")
+    await update.effective_message.reply_text("Unknown command. Available: /new (start a new conversation), /start.")
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -333,12 +333,12 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             prompt = _group_prompt(user, caption, context.bot.username) if is_group else caption
             await _serve_turn(msg, chat, context, prompt)
             return
-        await msg.reply_text("這則訊息我抓不到內容(沒有可下載的檔案)。")
+        await msg.reply_text("Couldn't extract any content from this message (nothing downloadable).")
         return
 
     file_id, fname, size, kind = resolved
     if size and size > TG_DOWNLOAD_LIMIT:
-        await msg.reply_text(f"📎 {fname} 太大({size // 1024 // 1024} MB)— Telegram bot 最多下載 20 MB。")
+        await msg.reply_text(f"📎 {fname} is too large ({size // 1024 // 1024} MB) — Telegram bots can download at most 20 MB.")
         return
 
     dest_dir = settings.attach_dir / f"{int(time.time())}-{chat.id}"
@@ -350,16 +350,16 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         path.chmod(0o600)
     except Exception as e:
         log.error("download failed: %s", e)
-        await msg.reply_text(f"⚠️ 檔案下載失敗:{e}")
+        await msg.reply_text(f"⚠️ File download failed: {e}")
         return
 
     kb = path.stat().st_size // 1024
-    head = caption if caption else "使用者傳了一個檔案,看內容並判斷要不要動作。"
+    head = caption if caption else "The user sent a file — look at its content and decide whether to act on it."
     if caption and is_group:
         head = _group_prompt(user, caption, context.bot.username)
     prompt = (
-        f"{head}\n\n--- 附件 ({kind}) ---\n{fname} ({kb} KB) → {path}\n"
-        "(檔案已存到上面路徑,要看就讀檔/解析 — 圖片、文件、音訊用你的工具開。)"
+        f"{head}\n\n--- attachment ({kind}) ---\n{fname} ({kb} KB) → {path}\n"
+        "(The file is saved at the path above — read/parse it if needed; open images, documents, audio with your tools.)"
     )
     await _serve_turn(msg, chat, context, prompt)
 
@@ -382,7 +382,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     try:
         owner_id = context.bot_data["settings"].owner_id
-        await context.bot.send_message(chat_id=owner_id, text=f"⚠️ bot handler 掛了:{context.error}")
+        await context.bot.send_message(chat_id=owner_id, text=f"⚠️ bot handler crashed: {context.error}")
     except Exception:
         pass
 
@@ -391,7 +391,7 @@ async def post_init(app: Application) -> None:
     # Sync the bot's Telegram-side presentation on every start. Idempotent; wrapped so a
     # transient API hiccup can't crash startup.
     try:
-        await app.bot.set_my_commands([BotCommand("new", "開新對話(清掉 session 記憶)")])
+        await app.bot.set_my_commands([BotCommand("new", "Start a new conversation (clears session memory)")])
         await app.bot.set_my_name(app.bot_data["settings"].agent_name)
     except Exception as e:
         log.warning("post_init presentation failed (non-fatal): %s", e)

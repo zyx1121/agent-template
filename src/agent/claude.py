@@ -35,12 +35,14 @@ log = logging.getLogger("agent.claude")
 # is the one file a fork is expected to touch — this instruction has to survive every fork
 # untouched, since it's the only thing standing between claude and a promise it can't keep.
 SCHEDULING_NOTE = (
-    "排程規則:任何「提醒我」「定時」「每天/每週跑一次」之類的需求,唯一機制是 "
-    "mcp__schedule__* 工具(schedule_add / schedule_list / schedule_edit / schedule_remove)。"
-    "排程由 bot 的長駐 process 持久保存,到點會在對應的聊天視窗自動跑一輪、把結果傳回去,"
-    "不受這次對話結束影響。絕對不要使用內建的 CronCreate / CronList —— 那只是這個 session "
-    "自己的記憶,只活在這一次 `claude -p` 呼叫裡,本輪一結束就蒸發,永遠不會真的觸發。也不要"
-    "自己去建 OS 層的 cron / at / systemd timer。"
+    "Scheduling rule: for any 'remind me', 'at a set time', 'run this every day/week' type "
+    "request, the only mechanism is the mcp__schedule__* tools (schedule_add / schedule_list / "
+    "schedule_edit / schedule_remove). Schedules are persisted by the bot's long-running "
+    "process — when one fires, it runs a full turn in the same chat and sends the result back, "
+    "unaffected by this conversation ending. Never use the built-in CronCreate / CronList — "
+    "those only live in this session's own memory, scoped to this single `claude -p` "
+    "invocation; the moment this turn ends they evaporate and will never actually fire. Also "
+    "never set up an OS-level cron / at / systemd timer yourself."
 )
 
 
@@ -220,4 +222,4 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
     new_sid = result_event.get("session_id", "")
     if new_sid:
         sf.write_text(new_sid)
-    return result_event.get("result") or "(claude 回了空訊息)"
+    return result_event.get("result") or "(claude returned an empty message)"
