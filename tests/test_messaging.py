@@ -46,10 +46,10 @@ class MdToHtml(unittest.TestCase):
         self.assertEqual(md_to_html("a_b_c stays literal"), "a_b_c stays literal")
 
     def test_table_becomes_bullet_list(self):
-        md = "| repo | visibility | last updated |\n|---|---|---|\n| ai.winlab.tw | Public | 2026-07-10 |"
+        md = "| repo | visibility | last updated |\n|---|---|---|\n| example.com | Public | 2026-07-10 |"
         self.assertEqual(
             md_to_html(md),
-            "• ai.winlab.tw — visibility: Public · last updated: 2026-07-10",
+            "• example.com — visibility: Public · last updated: 2026-07-10",
         )
 
     def test_table_row_empty_cells_dropped(self):
@@ -60,19 +60,19 @@ class MdToHtml(unittest.TestCase):
         # this is the actual failure mode that motivated switching away from a <pre> grid:
         # Telegram mobile hard-wraps a long <pre> line instead of scrolling it, breaking the
         # whole grid's alignment. A bullet line just wraps like normal text — nothing to break.
-        md = "| Skill | purpose |\n|---|---|\n| sync-recruitment | sync recruitment listings from Google Drive to ai.winlab.tw |"
+        md = "| Skill | purpose |\n|---|---|\n| sync-reports | sync weekly reports from Google Drive to example.com |"
         self.assertEqual(
             md_to_html(md),
-            "• sync-recruitment — purpose: sync recruitment listings from Google Drive to ai.winlab.tw",
+            "• sync-reports — purpose: sync weekly reports from Google Drive to example.com",
         )
 
     def test_table_cell_markdown_still_renders(self):
         # unlike the old <pre>-stash approach, a list line is NOT stashed inert — bold/code
         # inside a cell still goes through the normal passes below.
-        md = "| repo | visibility |\n|---|---|\n| `ai.winlab.tw` | **Public** |"
+        md = "| repo | visibility |\n|---|---|\n| `example.com` | **Public** |"
         self.assertEqual(
             md_to_html(md),
-            "• <code>ai.winlab.tw</code> — visibility: <b>Public</b>",
+            "• <code>example.com</code> — visibility: <b>Public</b>",
         )
 
     def test_table_inside_code_fence_not_mistaken_for_table(self):
