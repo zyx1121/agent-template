@@ -185,6 +185,9 @@ allow-listed group can drive `claude` on the host — only add groups whose memb
 - **Live progress** — one Telegram message updates in place with each tool `claude` runs
   (`📖 Read`, `⚡️ Bash …`, `📝 Edit`), so a long turn visibly shows what it's doing.
 - **Reactions** — a random emoji acks receipt, overwritten with 👍 / 👎 when the turn ends.
+- **Typing indicator** — a real message gets an immediate "typing…" that's kept alive until the
+  turn's first outbound message appears (progress bubble or reply, whichever comes first), then
+  stops for good. Scheduled firings never trigger it — no one's waiting on those.
 
 ## Scheduling
 

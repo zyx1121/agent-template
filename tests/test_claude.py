@@ -1,14 +1,18 @@
 """Tests for the pure runtime-MCP-config merge in claude.py — the three cases from the
 scheduling design: no user mcp-config.json, a user config with other servers, and a user
 config that collides with the builtin `schedule` name (builtin must win) — plus is_no_reply,
-the sentinel check that gates the scheduled-firing NO_REPLY path in handlers.py."""
+the sentinel check that gates the scheduled-firing NO_REPLY path in handlers.py. Also covers
+ProgressBubble's `on_first_send` seam (the typing-indicator feature's hook into "the turn's
+first outbound message just landed") — `context.bot` is mocked, no network."""
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from agent.claude import NO_REPLY_SENTINEL, _build_mcp_config, is_no_reply
+from agent.claude import NO_REPLY_SENTINEL, ProgressBubble, _build_mcp_config, is_no_reply
 from agent.config import Settings
 
 
@@ -83,6 +87,55 @@ class IsNoReply(unittest.TestCase):
     def test_empty_or_unrelated_reply_is_not_no_reply(self):
         self.assertFalse(is_no_reply(""))
         self.assertFalse(is_no_reply("all good"))
+
+
+def _bubble_context() -> SimpleNamespace:
+    sent = SimpleNamespace(message_id=999)
+    return SimpleNamespace(bot=SimpleNamespace(
+        send_message=AsyncMock(return_value=sent),
+        edit_message_text=AsyncMock(),
+    ))
+
+
+class ProgressBubbleOnFirstSend(unittest.IsolatedAsyncioTestCase):
+    async def test_hook_fires_once_when_the_bubble_first_actually_sends(self):
+        context = _bubble_context()
+        hook = AsyncMock()
+        bubble = ProgressBubble(context, chat_id=42, on_first_send=hook)
+        await bubble.add("📖 first step")
+        hook.assert_awaited_once_with()
+
+    async def test_hook_not_called_again_on_later_edits(self):
+        context = _bubble_context()
+        hook = AsyncMock()
+        bubble = ProgressBubble(context, chat_id=42, on_first_send=hook)
+        await bubble.add("📖 first step")  # first real send -> hook fires
+        # A second step, flushed with force=True to bypass the 3s throttle (this is now an
+        # EDIT of the same message, not a new send — message_id is already set).
+        bubble._steps.append("⚡️ second step")
+        await bubble._flush(force=True)
+        context.bot.edit_message_text.assert_awaited_once()  # the edit really did happen
+        hook.assert_awaited_once_with()  # still exactly once, not once per edit
+
+    async def test_no_hook_is_safe(self):
+        context = _bubble_context()
+        bubble = ProgressBubble(context, chat_id=42)  # on_first_send defaults to None
+        await bubble.add("📖 first step")  # must not raise
+
+    async def test_hook_failure_does_not_break_the_bubble(self):
+        context = _bubble_context()
+        hook = AsyncMock(side_effect=Exception("typing indicator stop blew up"))
+        bubble = ProgressBubble(context, chat_id=42, on_first_send=hook)
+        await bubble.add("📖 first step")  # must not raise despite the hook failing
+        self.assertEqual(bubble.message_id, 999)  # the actual bubble send still landed
+
+    async def test_hook_not_fired_when_send_itself_fails(self):
+        context = _bubble_context()
+        context.bot.send_message.side_effect = Exception("network hiccup")
+        hook = AsyncMock()
+        bubble = ProgressBubble(context, chat_id=42, on_first_send=hook)
+        await bubble.add("📖 first step")
+        hook.assert_not_awaited()  # no real "first send" happened, so no signal
 
 
 if __name__ == "__main__":
