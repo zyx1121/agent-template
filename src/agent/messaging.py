@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,10 +24,72 @@ import urllib.request
 last_error = ""
 
 
+def _split_row(line: str) -> list:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def _table_sep(line: str) -> bool:
+    """True if `line` is a GFM table separator row (e.g. `|---|:--:|--|`) — dashes/colons
+    only, at least one dash. Distinguishes a real table header from a stray line with a `|`."""
+    cells = _split_row(line)
+    return bool(cells) and all(re.fullmatch(r":?-{2,}:?", c) for c in cells)
+
+
+def _vwidth(s: str) -> int:
+    """Display width in a monospace terminal: CJK/fullwidth chars are 2 columns wide, so a
+    plain len() would misalign any table mixing CJK and ASCII cells."""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s)
+
+
+def _render_table(rows: list) -> str:
+    """Rows (header first, already split into cells) -> a monospace-aligned block. Telegram
+    has no table element in any parse mode (HTML or MarkdownV2) — a <pre> block with padded
+    columns is the closest a chat message gets to an actual table."""
+    ncols = max(len(r) for r in rows)
+    rows = [r + [""] * (ncols - len(r)) for r in rows]
+    widths = [max(_vwidth(r[i]) for r in rows) for i in range(ncols)]
+
+    def line(cells):
+        return " | ".join(c + " " * (widths[i] - _vwidth(c)) for i, c in enumerate(cells))
+
+    out = [line(rows[0]), "-+-".join("-" * w for w in widths)]
+    out += [line(r) for r in rows[1:]]
+    return "\n".join(out)
+
+
+def _stash_tables(text: str, code: list) -> str:
+    """Find GFM tables (header row + |---|---| separator + body rows) and replace each with a
+    placeholder pointing at a monospace-rendered <pre> block, appended to `code`. Must run
+    after the ``` fence stash so a code block containing a literal `|` is never mistaken for
+    a table."""
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        if "|" in lines[i] and i + 1 < len(lines) and _table_sep(lines[i + 1]):
+            header = _split_row(lines[i])
+            body, j = [], i + 2
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                body.append(_split_row(lines[j]))
+                j += 1
+            code.append(f"<pre>{_render_table([header] + body)}</pre>")
+            out.append(f"\x00{len(code) - 1}\x00")
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
 def md_to_html(text: str) -> str:
-    """Convert the markdown claude emits into Telegram-safe HTML. Code spans are lifted out
-    into placeholders before any prose regex runs: Telegram 400s on entities nested inside
-    pre/code, and the bullet/header rewrites must never touch code content."""
+    """Convert the markdown claude emits into Telegram-safe HTML. Code spans and tables are
+    lifted out into placeholders before any prose regex runs: Telegram 400s on entities
+    nested inside pre/code, and the bullet/header/italic rewrites must never touch that
+    content (a table's `-` separator row would otherwise be mangled by the bullet regex)."""
     text = html.escape(text, quote=False)  # & < >
     text = text.replace("\x00", "")  # NUL never legit; keeps placeholders unforgeable
     code = []
@@ -38,10 +101,13 @@ def md_to_html(text: str) -> str:
         return sub
 
     text = re.sub(r"```[^\n]*\n(.*?)```", stash("pre"), text, flags=re.DOTALL)
+    text = _stash_tables(text, code)                                # GFM table -> <pre>
     text = re.sub(r"`([^`\n]+)`", stash("code"), text)              # inline code
     text = re.sub(r"\*\*([^\n*]+)\*\*", r"<b>\1</b>", text)         # **bold**
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.*)$", r"<b>\1</b>", text)  # # headers -> bold
     text = re.sub(r"(?m)^(\s*)[-*]\s+", r"\1• ", text)             # - / * bullets -> •
+    text = re.sub(r"\*([^\n*]+)\*", r"<i>\1</i>", text)            # *italic*
+    text = re.sub(r"(?<!\w)_([^\n_]+)_(?!\w)", r"<i>\1</i>", text)  # _italic_
     return re.sub(r"\x00(\d+)\x00", lambda m: code[int(m.group(1))], text)
 
 

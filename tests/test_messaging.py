@@ -35,6 +35,40 @@ class MdToHtml(unittest.TestCase):
         # ** inside inline code must stay literal, not become <b>
         self.assertEqual(md_to_html("`**not bold**`"), "<code>**not bold**</code>")
 
+    def test_italic_single_star(self):
+        self.assertEqual(md_to_html("*hi* there"), "<i>hi</i> there")
+
+    def test_italic_underscore(self):
+        self.assertEqual(md_to_html("_hi_ there"), "<i>hi</i> there")
+
+    def test_italic_underscore_does_not_eat_identifiers(self):
+        # snake_case must not be read as an underscore-italic delimiter pair
+        self.assertEqual(md_to_html("a_b_c stays literal"), "a_b_c stays literal")
+
+    def test_table_ascii_golden(self):
+        md = "| a | bb |\n|---|---|\n| 1 | 2 |"
+        self.assertEqual(md_to_html(md), "<pre>a | bb\n--+---\n1 | 2 </pre>")
+
+    def test_table_cjk_columns_stay_aligned(self):
+        # east-asian-width chars are 2 columns wide — a naive len()-based pad would misalign
+        md = "| repo | 可見度 |\n|---|---|\n| ai.winlab.tw | public |\n| skills | 好 |"
+        out = md_to_html(md)
+        body = out[len("<pre>"):-len("</pre>")]
+        lines = body.split("\n")
+        self.assertEqual(len(lines), 4)  # header, separator, 2 data rows
+        sep_col = lines[1].index("+")
+        for ln in (lines[0], lines[2], lines[3]):
+            self.assertEqual(ln[sep_col], "|")
+
+    def test_table_inside_code_fence_not_mistaken_for_table(self):
+        # a ``` block containing `|`-heavy text must stay a plain code block, not be
+        # re-parsed as a GFM table (the fence stash must run first)
+        md = "```\n| not | a | table |\n|---|---|---|\n```"
+        self.assertEqual(md_to_html(md), "<pre>| not | a | table |\n|---|---|---|\n</pre>")
+
+    def test_pipe_text_without_separator_row_untouched(self):
+        self.assertEqual(md_to_html("a | b"), "a | b")
+
 
 class Chunks(unittest.TestCase):
     def test_short_stays_single(self):
