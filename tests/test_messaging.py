@@ -45,20 +45,35 @@ class MdToHtml(unittest.TestCase):
         # snake_case must not be read as an underscore-italic delimiter pair
         self.assertEqual(md_to_html("a_b_c stays literal"), "a_b_c stays literal")
 
-    def test_table_ascii_golden(self):
-        md = "| a | bb |\n|---|---|\n| 1 | 2 |"
-        self.assertEqual(md_to_html(md), "<pre>a | bb\n--+---\n1 | 2 </pre>")
+    def test_table_becomes_bullet_list(self):
+        md = "| repo | 可見度 | 最後更新 |\n|---|---|---|\n| ai.winlab.tw | Public | 2026-07-10 |"
+        self.assertEqual(
+            md_to_html(md),
+            "• ai.winlab.tw — 可見度: Public · 最後更新: 2026-07-10",
+        )
 
-    def test_table_cjk_columns_stay_aligned(self):
-        # east-asian-width chars are 2 columns wide — a naive len()-based pad would misalign
-        md = "| repo | 可見度 |\n|---|---|\n| ai.winlab.tw | public |\n| skills | 好 |"
-        out = md_to_html(md)
-        body = out[len("<pre>"):-len("</pre>")]
-        lines = body.split("\n")
-        self.assertEqual(len(lines), 4)  # header, separator, 2 data rows
-        sep_col = lines[1].index("+")
-        for ln in (lines[0], lines[2], lines[3]):
-            self.assertEqual(ln[sep_col], "|")
+    def test_table_row_empty_cells_dropped(self):
+        md = "| repo | 可見度 | 備註 |\n|---|---|---|\n| skills | private |  |"
+        self.assertEqual(md_to_html(md), "• skills — 可見度: private")
+
+    def test_table_long_cell_has_no_column_to_misalign(self):
+        # this is the actual failure mode that motivated switching away from a <pre> grid:
+        # Telegram mobile hard-wraps a long <pre> line instead of scrolling it, breaking the
+        # whole grid's alignment. A bullet line just wraps like normal text — nothing to break.
+        md = "| Skill | 用途 |\n|---|---|\n| sync-recruitment | 從 Google Drive 同步企業徵才資訊到 ai.winlab.tw |"
+        self.assertEqual(
+            md_to_html(md),
+            "• sync-recruitment — 用途: 從 Google Drive 同步企業徵才資訊到 ai.winlab.tw",
+        )
+
+    def test_table_cell_markdown_still_renders(self):
+        # unlike the old <pre>-stash approach, a list line is NOT stashed inert — bold/code
+        # inside a cell still goes through the normal passes below.
+        md = "| repo | 可見度 |\n|---|---|\n| `ai.winlab.tw` | **Public** |"
+        self.assertEqual(
+            md_to_html(md),
+            "• <code>ai.winlab.tw</code> — 可見度: <b>Public</b>",
+        )
 
     def test_table_inside_code_fence_not_mistaken_for_table(self):
         # a ``` block containing `|`-heavy text must stay a plain code block, not be
