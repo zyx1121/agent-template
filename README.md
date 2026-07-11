@@ -226,6 +226,26 @@ Things worth knowing:
   suppressed. This sentinel only works on a scheduled firing: a normal conversation with the
   user always gets a real reply, even if claude were to send `NO_REPLY` there by mistake.
 
+## Skills
+
+Forked agents tend to grow recurring workflows (a daily standup, a weekly report) that are
+better expressed as Claude Code skills than as ever-longer schedule prompts. The pattern
+that works here:
+
+- Keep skills in their own repo — public is convenient, the host can clone it without any
+  auth — cloned somewhere on the host (e.g. `~/skills`), and **symlink each skill** into
+  `~/.claude/skills/<name>`. Headless `claude -p` picks up symlinked skills fine.
+- **Link every skill a schedule references.** A schedule whose prompt says "run the
+  weekly-report skill" still fires with the symlink missing — claude just can't see the
+  skill and improvises or comes up empty, with nothing in the journal pointing at the real
+  cause. After adding one, verify visibility:
+  `claude -p 'List your available skills, names only.'`
+- There's no auto-pull — updating the skills repo means `git pull` on the host (or have
+  the schedule prompt do the pull as its first step).
+- If a skill shells out to `gh api` for read endpoints, put filters in the URL query
+  string (`gh api "repos/<o>/<r>/commits?since=$ISO"`). Passing them with `-f` silently
+  turns the request into a POST, and GET-only endpoints answer it with a 404.
+
 ## Extra MCP servers
 
 The builtin `schedule` server (above) is always present and can't be overridden — a
@@ -252,3 +272,16 @@ it's invisible to any other headless `claude -p` invocation. No file = just the 
 
 No `--allowedTools` entry needed — `--permission-mode bypassPermissions` (already used for
 every turn) trusts MCP tools the same way it trusts `Bash`/`Read`/`Write`.
+
+To verify a server by hand on the host (is the token right? does the tool actually
+answer?), run a turn the same way the bot does — load `.env` and pass the same flags:
+
+```
+set -a && . ./.env && set +a
+claude -p 'Use the <server> <tool> tool and report the result.' \
+  --mcp-config mcp-config.json --strict-mcp-config --permission-mode bypassPermissions
+```
+
+Don't drop `--permission-mode bypassPermissions` here: without it every MCP call stops at
+a permission prompt that headless mode auto-denies, which looks exactly like a broken
+server or a bad token when it's neither.
