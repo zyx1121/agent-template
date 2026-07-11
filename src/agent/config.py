@@ -75,6 +75,13 @@ class Settings:
         return self.home / "SOUL.md"
 
     @property
+    def mcp_config_file(self) -> Path:
+        # Optional — mounted via --mcp-config/--strict-mcp-config only if it exists (see
+        # claude.py). Absent by default so a fork with no extra MCP servers behaves exactly
+        # like before this existed.
+        return self.home / "mcp-config.json"
+
+    @property
     def run_dir(self) -> Path:
         return self.home / "run"
 

@@ -181,3 +181,26 @@ allow-listed group can drive `claude` on the host — only add groups whose memb
 - **Live progress** — one Telegram message updates in place with each tool `claude` runs
   (`📖 Read`, `⚡️ Bash …`, `📝 Edit`), so a long turn visibly shows what it's doing.
 - **Reactions** — a random emoji acks receipt, overwritten with 👍 / 👎 when the turn ends.
+
+## Extra MCP servers
+
+Drop an `mcp-config.json` (gitignored, same class as `.env`) in the repo root and every turn
+mounts it via `--mcp-config --strict-mcp-config` — no code change needed. `--strict-mcp-config`
+means this is the *only* source of MCP servers for the bot; a `claude mcp add --scope user`
+done interactively on the same box is invisible to it, same as it's invisible to any other
+headless `claude -p` invocation. No file = no flag = identical behavior to before this existed.
+
+```json
+{
+  "mcpServers": {
+    "sensorium": {
+      "type": "http",
+      "url": "https://sensorium.example.com/mcp",
+      "headers": { "Authorization": "Bearer <token>" }
+    }
+  }
+}
+```
+
+No `--allowedTools` entry needed — `--permission-mode bypassPermissions` (already used for
+every turn) trusts MCP tools the same way it trusts `Bash`/`Read`/`Write`.

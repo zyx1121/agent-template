@@ -1,4 +1,5 @@
 .env
+mcp-config.json
 run/
 .venv/
 __pycache__/

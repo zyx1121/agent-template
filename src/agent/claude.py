@@ -106,6 +106,14 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
                "--permission-mode", "bypassPermissions"]
         if persona.strip():
             cmd += ["--append-system-prompt", persona]
+        if settings.mcp_config_file.exists():
+            # --strict-mcp-config: this is a non-interactive/headless invocation, so
+            # ~/.claude.json's user-scope mcpServers (if any exist on this box) must NOT
+            # silently leak in — the only servers available are the ones explicitly listed
+            # in mcp-config.json. No --allowedTools needed: --permission-mode
+            # bypassPermissions already trusts every tool, MCP or built-in, the same way it
+            # already does for Bash/Read/Write.
+            cmd += ["--mcp-config", str(settings.mcp_config_file), "--strict-mcp-config"]
         if sid:
             cmd += ["--resume", sid]
         proc = await asyncio.create_subprocess_exec(
