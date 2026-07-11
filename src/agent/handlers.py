@@ -268,9 +268,18 @@ async def _schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     schedules = await asyncio.to_thread(list_schedules, settings.schedules_file)
     if not schedules:
         return
+    # A `once` schedule's on-disk removal (below) doesn't retroactively change this in-memory
+    # `schedules` snapshot — if its cron matches more than one `pending` minute (e.g. a
+    # catch-up after a stalled tick, with a cron that isn't restricted to a single minute),
+    # the inner loop would otherwise see it again on the next pending minute and fire it a
+    # second time. Track ids fired this tick and skip repeats — at most one fire per `once`
+    # schedule per _schedule_tick call.
+    fired_once_ids: set[str] = set()
     for minute in pending:
         for sched in schedules:
             if not sched.get("enabled", True):
+                continue
+            if sched.get("once") and sched["id"] in fired_once_ids:
                 continue
             try:
                 hit = cron_matches(sched["cron"], minute)
@@ -289,6 +298,7 @@ async def _schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # scheduled minute (or the next schedule in this same minute) still has to run.
                 log.exception("schedule %s tick failed", sched["id"])
             if sched.get("once"):
+                fired_once_ids.add(sched["id"])
                 await asyncio.to_thread(remove_schedule, settings.schedules_file, sched["id"])
 
 
