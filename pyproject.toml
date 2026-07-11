@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Minimal single-owner Telegram ↔ Claude Code bridge — fork, reskin with a SOUL, deploy."
 requires-python = ">=3.10"
 dependencies = [
-    "python-telegram-bot>=21",
+    "mcp>=1.28.1",
+    "python-telegram-bot[job-queue]>=21",
 ]
 
 [build-system]

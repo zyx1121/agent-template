@@ -76,14 +76,21 @@ class Settings:
 
     @property
     def mcp_config_file(self) -> Path:
-        # Optional — mounted via --mcp-config/--strict-mcp-config only if it exists (see
-        # claude.py). Absent by default so a fork with no extra MCP servers behaves exactly
-        # like before this existed.
+        # Optional — extra user-defined MCP servers. When present, its mcpServers are merged
+        # into the per-turn runtime config claude.py always mounts (which also carries the
+        # builtin `schedule` server; a user entry named `schedule` never wins). Absent by
+        # default: forks without extra servers still get scheduling, nothing else.
         return self.home / "mcp-config.json"
 
     @property
     def run_dir(self) -> Path:
         return self.home / "run"
+
+    @property
+    def schedules_file(self) -> Path:
+        # The one file schedule_store.py reads/writes — shared by the bot's own JobQueue tick
+        # and every `python -m agent.mcp_schedule` subprocess claude spawns per turn.
+        return self.run_dir / "schedules.json"
 
     @property
     def outbox_dir(self) -> Path:
