@@ -41,7 +41,7 @@ def _table_sep(line: str) -> bool:
 
 def _row_to_bullet(header: list, row: list) -> str:
     """One table row -> one `• label — col: val · col: val` line. First column is the label;
-    empty cells are dropped instead of showing `· 欄位: `."""
+    empty cells are dropped instead of showing `· field: `."""
     label = row[0] if row else ""
     attrs = [f"{header[i]}: {row[i]}" for i in range(1, len(row)) if i < len(header) and row[i]]
     return f"• {label}" + (f" — {' · '.join(attrs)}" if attrs else "")

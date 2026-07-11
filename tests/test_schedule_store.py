@@ -21,7 +21,7 @@ class ScheduleStore(unittest.TestCase):
         self.assertEqual(list_schedules(self.path), [])
 
     def test_add_then_list(self):
-        sched = add_schedule(self.path, cron="0 8 * * *", prompt="早安", chat_id=123, note="daily")
+        sched = add_schedule(self.path, cron="0 8 * * *", prompt="good morning", chat_id=123, note="daily")
         self.assertEqual(len(sched["id"]), 6)
         self.assertTrue(sched["enabled"])
         self.assertFalse(sched["once"])

@@ -48,8 +48,8 @@ deploy/              systemd unit + idempotent install script
    to GitHub.)
 
 2. **Write the persona.** Edit `SOUL.md` — it's the *only* file you're expected to
-   change to make this a different agent. Everything under "你是 / 語氣 / 你會做的事 /
-   你不會做的事" gets injected as the Claude system prompt on every turn
+   change to make this a different agent. Everything under "You are / Tone / What you
+   do / What you don't do" gets injected as the Claude system prompt on every turn
    (`claude -p --append-system-prompt "$(cat SOUL.md)"`). The `src/agent/` package stays as-is.
 
 3. **Get a Telegram bot token.** Talk to [@BotFather](https://t.me/BotFather),

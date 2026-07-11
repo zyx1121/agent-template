@@ -43,45 +43,53 @@ def _chat_id() -> int:
 
 @mcp.tool()
 def schedule_add(cron: str, prompt: str, note: str = "", once: bool = False) -> str:
-    """建立一個持久排程,到點會在「這個」聊天視窗自動跑一輪 claude、並把結果傳回這裡 —— 這是
-    排程/提醒/定時任務唯一可靠的機制。排程存在 bot 的長駐 process 裡,不受這次對話結束影響。
+    """Create a persistent schedule — when it fires, it automatically runs a claude turn in
+    "this" chat and sends the result back here. This is the only reliable mechanism for
+    reminders/scheduled tasks. Schedules are stored in the bot's long-running process,
+    unaffected by this conversation ending.
 
     Args:
-        cron: 標準 5 欄 cron 表達式(分 時 日 月 週),例如 "0 8 * * *"(每天 8:00)、
-            "*/30 * * * *"(每 30 分鐘)、"0 9 * * 1-5"(平日早上 9 點)。週欄 0 和 7 都代表週日。
-        prompt: 到點後要交給 claude 執行的任務內容 —— 用完整的自然語言描述,執行時不會有
-            這次對話的上下文,寫得越自包含越好。
-        note: 給人看的簡短備註(schedule_list 會顯示),不影響執行邏輯。
-        once: True 表示只執行一次,fire 後自動從排程刪除;False(預設)依 cron 重複執行。
+        cron: standard 5-field cron expression (minute hour day month weekday), e.g.
+            "0 8 * * *" (daily at 8:00), "*/30 * * * *" (every 30 minutes), "0 9 * * 1-5"
+            (weekdays at 9am). Both 0 and 7 mean Sunday in the weekday field.
+        prompt: the task to hand to claude when it fires — describe it in complete natural
+            language; there's no context from this conversation at execution time, so the
+            more self-contained the better.
+        note: a short human-readable note (shown by schedule_list); doesn't affect execution.
+        once: True means fire exactly once and auto-delete afterward; False (default) repeats
+            per the cron expression.
 
     Returns:
-        成功則回排程 id + 摘要;cron 格式錯誤則回清楚的錯誤訊息(不會建立)。
+        On success, the schedule id + summary; on an invalid cron expression, a clear error
+        message (nothing is created).
     """
     err = validate_cron(cron)
     if err:
-        return f"❌ cron 格式錯誤:{err}"
+        return f"❌ invalid cron expression: {err}"
     sched = add_schedule(
         _schedules_file(), cron=cron, prompt=prompt, chat_id=_chat_id(), note=note, once=once
     )
-    return f"✅ 已建立排程 id={sched['id']} cron={cron} → {prompt[:60]}"
+    return f"✅ created schedule id={sched['id']} cron={cron} → {prompt[:60]}"
 
 
 @mcp.tool()
 def schedule_list() -> str:
-    """列出所有排程,包含其他聊天視窗建立的(單一 host、單一使用者部署,不做 chat 間隔離)。
-    改 (schedule_edit) 或刪 (schedule_remove) 一個排程之前,先用這個查它的 id。
+    """List all schedules, including ones created from other chats (single-host,
+    single-user deployment — no per-chat isolation). Look up a schedule's id here before
+    editing (schedule_edit) or deleting (schedule_remove) it.
 
     Returns:
-        每個排程一行摘要:id、是否啟用、是否單次、cron、所屬 chat_id、note、prompt 開頭。
-        沒有任何排程時明確說明,不回傳空字串。
+        One summary line per schedule: id, whether enabled, whether one-off, cron, its
+        chat_id, note, and the start of its prompt. Says so explicitly when there are none,
+        never returns an empty string.
     """
     schedules = list_schedules(_schedules_file())
     if not schedules:
-        return "目前沒有任何排程。"
+        return "No schedules yet."
     lines = []
     for s in schedules:
-        flag = "" if s.get("enabled", True) else "(已停用)"
-        once_flag = " [單次]" if s.get("once") else ""
+        flag = "" if s.get("enabled", True) else "(disabled)"
+        once_flag = " [once]" if s.get("once") else ""
         note = f" — {s['note']}" if s.get("note") else ""
         lines.append(
             f"{s['id']}{flag}{once_flag} · {s['cron']} · chat {s['chat_id']}{note}\n"
@@ -99,29 +107,32 @@ def schedule_edit(
     enabled: bool | None = None,
     once: bool | None = None,
 ) -> str:
-    """修改一個既有排程,只傳要改的欄位,其他留空(None)不動。常見用法:enabled=False 暫停
-    (不用刪掉重建)、改 cron 調時間、改 prompt 調任務內容。id 用 schedule_list() 查。
+    """Edit an existing schedule — only pass the fields you want to change, leave the rest
+    None. Common uses: enabled=False to pause (without deleting and recreating), changing
+    cron to retime it, changing prompt to retask it. Look up id via schedule_list().
 
     Returns:
-        更新後的排程摘要;id 不存在或 cron 格式錯誤則回清楚的錯誤訊息(不會套用)。
+        The updated schedule summary; if the id doesn't exist or the cron expression is
+        invalid, a clear error message (nothing is applied).
     """
     if cron is not None:
         err = validate_cron(cron)
         if err:
-            return f"❌ cron 格式錯誤:{err}"
+            return f"❌ invalid cron expression: {err}"
     sched = edit_schedule(
         _schedules_file(), id, cron=cron, prompt=prompt, note=note, enabled=enabled, once=once
     )
     if sched is None:
-        return f"❌ 找不到排程 id={id}"
-    return f"✅ 排程 id={sched['id']} 已更新 cron={sched['cron']} → {sched['prompt'][:60]}"
+        return f"❌ schedule not found: id={id}"
+    return f"✅ updated schedule id={sched['id']} cron={sched['cron']} → {sched['prompt'][:60]}"
 
 
 @mcp.tool()
 def schedule_remove(id: str) -> str:
-    """刪除一個排程,立即生效、不會再觸發。id 用 schedule_list() 查。"""
+    """Delete a schedule — effective immediately, it will never fire again. Look up id via
+    schedule_list()."""
     ok = remove_schedule(_schedules_file(), id)
-    return f"✅ 已刪除排程 {id}" if ok else f"❌ 找不到排程 id={id}"
+    return f"✅ deleted schedule {id}" if ok else f"❌ schedule not found: id={id}"
 
 
 def main() -> None:
