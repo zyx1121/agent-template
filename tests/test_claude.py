@@ -1,13 +1,14 @@
 """Tests for the pure runtime-MCP-config merge in claude.py — the three cases from the
 scheduling design: no user mcp-config.json, a user config with other servers, and a user
-config that collides with the builtin `schedule` name (builtin must win)."""
+config that collides with the builtin `schedule` name (builtin must win) — plus is_no_reply,
+the sentinel check that gates the scheduled-firing NO_REPLY path in handlers.py."""
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent.claude import _build_mcp_config
+from agent.claude import NO_REPLY_SENTINEL, _build_mcp_config, is_no_reply
 from agent.config import Settings
 
 
@@ -57,6 +58,31 @@ class BuildMcpConfig(unittest.TestCase):
         (self.home / "mcp-config.json").write_text("{not valid json")
         cfg = _build_mcp_config(self.settings, chat_id=1)
         self.assertEqual(set(cfg["mcpServers"].keys()), {"schedule"})
+
+
+class IsNoReply(unittest.TestCase):
+    def test_exact_sentinel_is_no_reply(self):
+        self.assertTrue(is_no_reply(NO_REPLY_SENTINEL))
+        self.assertTrue(is_no_reply("NO_REPLY"))
+
+    def test_surrounding_whitespace_still_counts(self):
+        self.assertTrue(is_no_reply("  NO_REPLY  "))
+        self.assertTrue(is_no_reply("\nNO_REPLY\n"))
+        self.assertTrue(is_no_reply("\t NO_REPLY\t"))
+
+    def test_sentinel_embedded_in_a_sentence_is_a_real_reply(self):
+        self.assertFalse(is_no_reply("NO_REPLY needed, everything is fine."))
+        self.assertFalse(is_no_reply("Nothing to report (NO_REPLY)."))
+        self.assertFalse(is_no_reply("NO_REPLY."))
+
+    def test_case_variants_are_not_the_sentinel(self):
+        self.assertFalse(is_no_reply("no_reply"))
+        self.assertFalse(is_no_reply("No_Reply"))
+        self.assertFalse(is_no_reply("NO_REPLY!"))
+
+    def test_empty_or_unrelated_reply_is_not_no_reply(self):
+        self.assertFalse(is_no_reply(""))
+        self.assertFalse(is_no_reply("all good"))
 
 
 if __name__ == "__main__":

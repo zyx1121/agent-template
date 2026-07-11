@@ -217,6 +217,14 @@ Things worth knowing:
 - **No timezone field** — cron expressions are evaluated against the bot process's local clock.
 - Ask claude to list/edit/remove schedules in plain language ("what reminders do I have set
   up?", "turn off the daily 8am one") — it drives `mcp__schedule__*` itself, no separate command.
+- **Silent monitoring via `NO_REPLY`.** For a monitoring-style schedule that should only speak
+  up when something's actually wrong ("check the error log every 30 minutes"), tell claude in
+  the schedule's prompt to reply with exactly `NO_REPLY` (nothing else in the message) when
+  there's nothing to report. A scheduled firing whose reply is exactly that token sends nothing
+  to the chat and deletes its own progress bubble, so a "nothing happened" tick leaves no trace.
+  Any files claude drops in the outbox during that turn are still sent — only the text reply is
+  suppressed. This sentinel only works on a scheduled firing: a normal conversation with the
+  user always gets a real reply, even if claude were to send `NO_REPLY` there by mistake.
 
 ## Extra MCP servers
 

@@ -13,7 +13,11 @@ session can't run concurrently). `_run_and_deliver` is the shared turn lifecycle
 OUTBOX → streamed run + reply → drain OUTBOX); `_serve_turn` wraps it with the ack/outcome
 reactions for a real incoming message, and `_schedule_tick` (below, driven by PTB's JobQueue)
 wraps it with cron matching for a persisted schedule firing on its own — no message, so no
-reactions, but otherwise the exact same turn machinery.
+reactions, but otherwise the exact same turn machinery. One exception: only a schedule firing
+(`scheduled=True`) honors the NO_REPLY sentinel (agent.claude.is_no_reply) — when claude's
+reply is exactly that token, `_run_and_deliver` sends nothing and deletes the progress bubble
+instead of replying, so a "nothing to report" monitoring tick leaves no trace. A real user
+message always gets a reply, even if claude emits that same token literally.
 """
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ from telegram.ext import (
     filters,
 )
 
-from agent.claude import run_turn
+from agent.claude import is_no_reply, run_turn
 from agent.config import Settings, load_settings, safe_name
 from agent.cron import cron_matches
 from agent.messaging import send_file, send_message
@@ -157,16 +161,37 @@ def _flush_outbox(settings: Settings, chat_id: int) -> list:
     return failed
 
 
-async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings) -> bool:
+async def _delete_progress_bubble(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int | None) -> None:
+    """Best-effort cleanup for a scheduled NO_REPLY turn: remove its progress bubble so a
+    "nothing to report" tick leaves no trace in the chat. `message_id` is None when the bubble
+    never actually sent (e.g. a turn with zero tool calls) — nothing to delete. Never fatal: the
+    message may already be gone or the API call may itself hiccup, either way that must not
+    affect the turn's outcome."""
+    if message_id is None:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        log.warning("progress bubble delete failed: %s", e)
+
+
+async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings,
+                            *, scheduled: bool = False) -> bool:
     """One claude turn, end-to-end delivery: drop stale OUTBOX files from a crashed prior turn,
     stream the turn (live progress bubble), send the reply, drain any files claude dropped in
     OUTBOX this time. Caller must already hold `_lock` — this has no opinion on WHY the turn is
     happening (an incoming message vs. a schedule firing on its own), only on running it safely
-    serialized with every other turn. Returns True on success, False if the turn itself errored."""
+    serialized with every other turn. Returns True on success, False if the turn itself errored.
+
+    `scheduled=True` (only `_schedule_tick` passes this) additionally honors the NO_REPLY
+    sentinel: if the reply is exactly that token, nothing is sent to the chat and the progress
+    bubble is deleted instead. A real user turn (`scheduled=False`, the default) never checks
+    for the sentinel — it always sends whatever claude replied, unchanged from before."""
     ok = True
     await asyncio.to_thread(_clear_outbox, settings)
+    bubble_message_id = None
     try:
-        reply = await run_turn(prompt, chat_id, context, settings)  # streams progress bubble
+        reply, bubble_message_id = await run_turn(prompt, chat_id, context, settings)  # streams progress bubble
     except subprocess.TimeoutExpired:
         reply = f"⚠️ claude timed out ({settings.turn_timeout}s)"
         ok = False
@@ -174,7 +199,10 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
         log.exception("claude turn failed")
         reply = f"⚠️ claude failed: {e}"
         ok = False
-    await asyncio.to_thread(send_message, settings.token, chat_id, reply)
+    if scheduled and is_no_reply(reply):
+        await _delete_progress_bubble(context, chat_id, bubble_message_id)
+    else:
+        await asyncio.to_thread(send_message, settings.token, chat_id, reply)
     failed = await asyncio.to_thread(_flush_outbox, settings, chat_id)
     if failed:
         await asyncio.to_thread(send_message, settings.token, chat_id,
@@ -254,7 +282,8 @@ async def _schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.info("schedule %s firing (cron=%s minute=%s)", sched["id"], sched["cron"], minute.isoformat())
             try:
                 async with _lock:  # same serialization as a real message turn
-                    await _run_and_deliver(_schedule_prompt(sched, minute), sched["chat_id"], context, settings)
+                    await _run_and_deliver(_schedule_prompt(sched, minute), sched["chat_id"], context, settings,
+                                            scheduled=True)
             except Exception:
                 # A firing that blows up must not take the tick loop down with it — the next
                 # scheduled minute (or the next schedule in this same minute) still has to run.
