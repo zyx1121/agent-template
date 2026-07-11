@@ -50,7 +50,10 @@ deploy/              systemd unit + idempotent install script
    (`claude -p --append-system-prompt "$(cat SOUL.md)"`). The `src/agent/` package stays as-is.
 
 3. **Get a Telegram bot token.** Talk to [@BotFather](https://t.me/BotFather),
-   `/newbot`, copy the token → `TELEGRAM_BOT_TOKEN`.
+   `/newbot`, copy the token → `TELEGRAM_BOT_TOKEN`. While you're there, also run
+   `/setprivacy` → select the new bot → **Disable**. Skip this and group mentions silently
+   never reach the bot (see **Groups** below for why) — cheaper to do it now than to debug it
+   later.
 
 4. **Get your Telegram user id.** Talk to [@userinfobot](https://t.me/userinfobot) →
    `OWNER_USER_ID`. This id is the trust anchor — always served, in DM or any group. Everyone
@@ -153,6 +156,13 @@ inside a sandboxed container. Running as a non-root user avoids this entirely (r
 
 By default the bot only serves the owner in DM. To let a group use it:
 
+0. **Privacy mode must be Disabled first** (skip if you already did this in step 3 of
+   *Open a new agent*). Telegram's default privacy mode ON only delivers commands
+   (`/foo@bot`) and replies to the bot's own messages — a plain `@bot hi` text mention is
+   **silently dropped by Telegram before it ever reaches the bot** (no error, nothing to log,
+   nothing to debug on this side). Fix: [@BotFather](https://t.me/BotFather) → `/setprivacy` →
+   select the bot → **Disable**. If the bot is already in the group, the setting doesn't apply
+   retroactively — remove it and re-add it after disabling.
 1. Add the bot to the group.
 2. @-mention it once — it replies with that group's `id`.
 3. Put the id in `.env`'s `ALLOWED_GROUP_IDS` (comma-separated for several) and restart.
