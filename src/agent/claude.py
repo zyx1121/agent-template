@@ -24,6 +24,7 @@ import re
 import subprocess
 import sys
 import time
+from typing import Awaitable, Callable
 
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
@@ -108,12 +109,19 @@ class ProgressBubble:
     """One live-updating Telegram message showing the tool steps of an in-flight claude turn —
     the progress-bubble equivalent of noir's claude-stream-progress.py, via PTB's bot API
     instead of hand-rolled urllib. Cosmetic: any Telegram API hiccup here must never break
-    the turn itself."""
+    the turn itself.
+
+    `on_first_send` (optional) fires exactly once, the moment this bubble's message actually
+    lands for the first time — i.e. the first outbound Telegram message of the turn. This
+    class has no opinion on what a caller does with that signal (it's a plain notification
+    hook, not a typing-indicator concept); `run_turn` just forwards it through from its own
+    caller. A hook failure is swallowed like every other cosmetic failure here."""
 
     _MAX_STEPS = 15
     _THROTTLE = 3.0
 
-    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                 *, on_first_send: Callable[[], Awaitable[None]] | None = None):
         self._context = context
         self._chat_id = chat_id
         self._steps: list = []
@@ -121,6 +129,7 @@ class ProgressBubble:
         self._sends = 0
         self._last_edit = 0.0
         self._last_text = ""
+        self._on_first_send = on_first_send
 
     @property
     def message_id(self) -> int | None:
@@ -145,6 +154,7 @@ class ProgressBubble:
         text = self._render()
         if text == self._last_text:
             return
+        first_send = self._msg_id is None
         try:
             if self._msg_id is None:
                 if self._sends >= 2:  # an unconfirmed send may have landed; one resend, then quiet
@@ -160,21 +170,33 @@ class ProgressBubble:
             self._last_text = text
         except Exception as e:
             log.warning("progress bubble flush failed: %s", e)
+            return
+        if first_send and self._msg_id is not None and self._on_first_send:
+            try:
+                await self._on_first_send()
+            except Exception as e:
+                log.warning("progress bubble on_first_send hook failed: %s", e)
 
     async def finish(self) -> None:
         await self._flush(force=True)
 
 
-async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings) -> tuple[str, int | None]:
+async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings,
+                    *, on_first_send: Callable[[], Awaitable[None]] | None = None) -> tuple[str, int | None]:
     """Run ONE claude turn as an async streaming subprocess. Returns (reply text, progress
     bubble message id) — the bubble id lets a caller delete it afterward (the scheduled-firing
     NO_REPLY path does; every other caller just ignores it), relaying tool-use steps to a
     live-updating progress bubble as they happen. Retries once with a fresh session if a
-    stale/expired session id fails to resume."""
+    stale/expired session id fails to resume.
+
+    `on_first_send` is forwarded verbatim to the ProgressBubble (see its docstring) — this
+    function has no opinion on it either, purely a pass-through seam for a caller (e.g.
+    handlers.py's typing indicator) that wants to know when the turn's first outbound message
+    actually lands."""
     persona = settings.soul_file.read_text() if settings.soul_file.exists() else ""
     system_prompt = f"{persona.strip()}\n\n{SCHEDULING_NOTE}" if persona.strip() else SCHEDULING_NOTE
     sf = settings.session_file(chat_id)
-    bubble = ProgressBubble(context, chat_id)
+    bubble = ProgressBubble(context, chat_id, on_first_send=on_first_send)
 
     # Written once per turn (not per retry attempt below — same chat_id, same config either
     # way), so both the fresh-session retry and the first attempt point at the same file.

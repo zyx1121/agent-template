@@ -11,9 +11,10 @@ the allow-list to groups whose members you trust with that.
 One message = one claude turn (`claude.run_turn`), serialized by an asyncio.Lock (a resumed
 session can't run concurrently). `_run_and_deliver` is the shared turn lifecycle (clear
 OUTBOX → streamed run + reply → drain OUTBOX); `_serve_turn` wraps it with the ack/outcome
-reactions for a real incoming message, and `_schedule_tick` (below, driven by PTB's JobQueue)
-wraps it with cron matching for a persisted schedule firing on its own — no message, so no
-reactions, but otherwise the exact same turn machinery. One exception: only a schedule firing
+reactions AND a "typing…" indicator (`TypingIndicator`) for a real incoming message, and
+`_schedule_tick` (below, driven by PTB's JobQueue) wraps it with cron matching for a persisted
+schedule firing on its own — no message, so no reactions and no typing indicator either, but
+otherwise the exact same turn machinery. One exception: only a schedule firing
 (`scheduled=True`) honors the NO_REPLY sentinel (agent.claude.is_no_reply) — when claude's
 reply is exactly that token, `_run_and_deliver` sends nothing and deletes the progress bubble
 instead of replying, so a "nothing to report" monitoring tick leaves no trace. A real user
@@ -29,9 +30,10 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timedelta
+from typing import Awaitable, Callable
 
 from telegram import BotCommand, ReactionTypeEmoji, Update
-from telegram.constants import ChatType
+from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -176,7 +178,8 @@ async def _delete_progress_bubble(context: ContextTypes.DEFAULT_TYPE, chat_id: i
 
 
 async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings,
-                            *, scheduled: bool = False) -> bool:
+                            *, scheduled: bool = False,
+                            on_output_start: Callable[[], Awaitable[None]] | None = None) -> bool:
     """One claude turn, end-to-end delivery: drop stale OUTBOX files from a crashed prior turn,
     stream the turn (live progress bubble), send the reply, drain any files claude dropped in
     OUTBOX this time. Caller must already hold `_lock` — this has no opinion on WHY the turn is
@@ -186,12 +189,20 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     `scheduled=True` (only `_schedule_tick` passes this) additionally honors the NO_REPLY
     sentinel: if the reply is exactly that token, nothing is sent to the chat and the progress
     bubble is deleted instead. A real user turn (`scheduled=False`, the default) never checks
-    for the sentinel — it always sends whatever claude replied, unchanged from before."""
+    for the sentinel — it always sends whatever claude replied, unchanged from before.
+
+    `on_output_start` (optional) fires once the turn has produced its first outbound message —
+    either the progress bubble's first send (forwarded straight through to `run_turn`, which
+    forwards it to ProgressBubble) or, if the bubble never sent one (e.g. zero tool calls), right
+    here before the final reply goes out. This function has no opinion on what the hook does
+    (`_serve_turn` uses it to stop the typing indicator) — it's a generic turn-lifecycle signal,
+    not a typing-indicator concept, and `_schedule_tick` never passes one."""
     ok = True
     await asyncio.to_thread(_clear_outbox, settings)
     bubble_message_id = None
     try:
-        reply, bubble_message_id = await run_turn(prompt, chat_id, context, settings)  # streams progress bubble
+        reply, bubble_message_id = await run_turn(  # streams progress bubble
+            prompt, chat_id, context, settings, on_first_send=on_output_start)
     except subprocess.TimeoutExpired:
         reply = f"⚠️ claude timed out ({settings.turn_timeout}s)"
         ok = False
@@ -199,6 +210,8 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
         log.exception("claude turn failed")
         reply = f"⚠️ claude failed: {e}"
         ok = False
+    if on_output_start:  # no-op if the bubble already fired it; covers the zero-tool-call case
+        await on_output_start()
     if scheduled and is_no_reply(reply):
         await _delete_progress_bubble(context, chat_id, bubble_message_id)
     else:
@@ -210,14 +223,76 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     return ok
 
 
+class TypingIndicator:
+    """Best-effort "typing…" UX for a turn triggered by a real incoming Telegram message: an
+    immediate ChatAction.TYPING on `start()`, kept alive every `_INTERVAL` seconds (Telegram
+    clears the indicator after ~5s, and also the instant any message is sent to the chat) until
+    `stop()`. Normally wired to `_run_and_deliver`'s `on_output_start` so it stops the moment
+    the turn's first outbound message appears (progress bubble or final reply, whichever comes
+    first) — it must never keep firing after that, or it reads as "typing a second message".
+    `stop()` is idempotent and safe to call from multiple sites (the hook AND a defensive
+    `finally`). Cosmetic: any Telegram API failure here is logged and swallowed, same as
+    ProgressBubble — it must never affect the turn itself."""
+
+    _INTERVAL = 4.0
+
+    def __init__(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+        self._context = context
+        self._chat_id = chat_id
+        self._task: asyncio.Task | None = None
+        self._stopped = False
+
+    async def _send(self) -> None:
+        try:
+            await self._context.bot.send_chat_action(chat_id=self._chat_id, action=ChatAction.TYPING)
+        except Exception as e:
+            log.warning("typing indicator send failed: %s", e)
+
+    async def _keep_alive(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._INTERVAL)
+                await self._send()
+        except asyncio.CancelledError:
+            pass
+
+    async def start(self) -> None:
+        """Send the first typing signal immediately, then schedule the ~_INTERVAL-second
+        keep-alive loop in the background."""
+        if self._stopped:
+            return
+        await self._send()
+        self._task = asyncio.create_task(self._keep_alive())
+
+    async def stop(self) -> None:
+        """Cancel the keep-alive loop. No-op if already stopped or never started."""
+        if self._stopped:
+            return
+        self._stopped = True
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+
+
 async def _serve_turn(msg, chat, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
-    """One claude turn triggered by a real incoming message: ack reaction, the shared
+    """One claude turn triggered by a real incoming message: ack reaction, a "typing…" indicator
+    for the duration until the turn's first outbound message appears, the shared
     run-and-deliver lifecycle, outcome reaction. Shared by on_message and on_media so the turn
-    lifecycle lives in exactly one place."""
+    lifecycle lives in exactly one place. A schedule firing (`_schedule_tick`) never goes through
+    here — no real message means no one is watching a typing indicator."""
     settings = _settings(context)
     async with _lock:  # serialize turns
         await _set_reaction(msg, random.choice(REACTIONS))  # "got it" ack
-        ok = await _run_and_deliver(prompt, chat.id, context, settings)
+        typing = TypingIndicator(context, chat.id)
+        await typing.start()
+        try:
+            ok = await _run_and_deliver(prompt, chat.id, context, settings, on_output_start=typing.stop)
+        finally:
+            await typing.stop()  # defensive: guarantees no lingering keep-alive on any exit path
         await _set_reaction(msg, "👍" if ok else "👎")  # overwrite the ack with the outcome
 
 
