@@ -105,7 +105,17 @@ def load_settings() -> Settings:
     """Load `.env`, then build Settings from the environment. Raises KeyError early if a
     required var (TELEGRAM_BOT_TOKEN / OWNER_USER_ID) is missing — fail fast at startup,
     not mid-turn."""
-    home = Path(os.environ.get("AGENT_HOME") or Path(__file__).resolve().parents[2])
+    # Path.cwd(), NOT Path(__file__).resolve().parents[N] — __file__ points into
+    # .venv/lib/pythonX/site-packages/agent/ for the --no-editable install deploy/install.sh
+    # actually uses (uv sync --no-editable), so a parents[N] climb lands inside the venv, not
+    # the repo. SOUL.md/mcp-config.json/run/ then silently resolve to nonexistent paths there:
+    # persona and MCP servers never load, session files write to a location `uv sync
+    # --reinstall` wipes on every redeploy — no crash, no log, just quietly not doing what the
+    # file on disk says it should. Both real invocations (deploy/agent.service's
+    # WorkingDirectory=, and `uv run python -m agent` per the README) already guarantee cwd
+    # is the repo root, so Path.cwd() is a default that's actually true in both editable and
+    # non-editable installs, instead of one that only happens to be true in editable mode.
+    home = Path(os.environ.get("AGENT_HOME") or Path.cwd())
     load_env(home / ".env")
     settings = Settings(
         token=os.environ["TELEGRAM_BOT_TOKEN"],
