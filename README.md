@@ -21,14 +21,17 @@ run `claude setup-token` in a browser).
 ## Project layout
 
 ```
-pyproject.toml       project metadata + the single dependency (python-telegram-bot)
+pyproject.toml       project metadata + dependencies (python-telegram-bot, mcp)
 SOUL.md              the persona — the ONLY file you change to make a different agent
 .env                 secrets + config (copied from .env.example, gitignored)
 src/agent/
   config.py          Settings dataclass + env parsing, in one place
   messaging.py       outbound Telegram sender + markdown→HTML rendering (sync, urllib)
   claude.py          one streaming `claude -p` turn + the live progress bubble
-  handlers.py        Telegram handlers, access control, app wiring / entrypoint
+  handlers.py        Telegram handlers, access control, app wiring / entrypoint, JobQueue tick
+  cron.py            dependency-free 5-field cron matcher
+  schedule_store.py  schedules.json read/write layer (shared by bot + mcp_schedule.py)
+  mcp_schedule.py    stdio MCP server exposing schedule CRUD to claude
   __main__.py        `python -m agent`
 tests/               pure-function characterization tests (no network, no token)
 deploy/              systemd unit + idempotent install script
@@ -96,7 +99,8 @@ Without uv, a plain venv works too — `pip install .` then `python -m agent`.
 
 ## Tests
 
-The fiddly pure functions (markdown→HTML rendering, message chunking, env parsing) have
+The fiddly pure functions (markdown→HTML rendering, message chunking, env parsing, the cron
+matcher, the schedules.json read/write layer, the runtime MCP config merge) have
 characterization tests that run with no network and no bot token:
 
 ```
@@ -182,13 +186,49 @@ allow-listed group can drive `claude` on the host — only add groups whose memb
   (`📖 Read`, `⚡️ Bash …`, `📝 Edit`), so a long turn visibly shows what it's doing.
 - **Reactions** — a random emoji acks receipt, overwritten with 👍 / 👎 when the turn ends.
 
+## Scheduling
+
+`claude` can set up persistent reminders / recurring tasks — "remind me at 9am", "ping this
+group every Monday" — via a builtin `mcp__schedule__*` MCP tool that's always mounted (see
+**Extra MCP servers** below), regardless of persona. This is deliberate: claude's own built-in
+`CronCreate`/`CronList` only live inside the current `claude -p` process's memory, and this bot
+spawns a brand new `claude -p` per Telegram message — the moment that turn ends, any
+`CronCreate` job it made evaporates and will never fire. Every turn's system prompt tells
+claude this explicitly, so it should never reach for `CronCreate` in the first place.
+
+Real persistence lives in the bot process itself: schedules are stored in `run/schedules.json`
+(create/edit/list/remove all go through the MCP tool), and a `JobQueue` job ticks every 60
+seconds checking which schedules' cron expression matches the current minute. A hit runs a full
+`claude -p` turn — same machinery as an incoming message, no user text involved this time — and
+delivers the reply to the schedule's chat.
+
+Things worth knowing:
+
+- **Downtime isn't backfilled.** The "last processed minute" is in-memory only. If the bot is
+  down when a schedule would have fired, that firing is simply skipped — it does not run
+  late/catch-up on restart. (Small in-process ticking delays, e.g. the event loop being briefly
+  busy, ARE caught up, capped at 5 minutes.)
+- **`once: true` schedules self-delete** after firing — use these for one-off reminders instead
+  of a cron expression that only matches one specific minute.
+- **A same-minute restart can double-fire.** Because "last processed minute" isn't persisted to
+  disk, restarting the bot in the same minute a schedule fired can make it fire again on the
+  first tick after restart. Accepted tradeoff for a single-owner bot — not worth a persisted
+  firing ledger.
+- **No timezone field** — cron expressions are evaluated against the bot process's local clock.
+- Ask claude to list/edit/remove schedules in plain language ("what reminders do I have set
+  up?", "turn off the daily 8am one") — it drives `mcp__schedule__*` itself, no separate command.
+
 ## Extra MCP servers
 
+The builtin `schedule` server (above) is always present and can't be overridden — a
+`mcp-config.json` entry named `schedule` is ignored in favor of it (a warning is logged).
 Drop an `mcp-config.json` (gitignored, same class as `.env`) in the repo root and every turn
-mounts it via `--mcp-config --strict-mcp-config` — no code change needed. `--strict-mcp-config`
-means this is the *only* source of MCP servers for the bot; a `claude mcp add --scope user`
-done interactively on the same box is invisible to it, same as it's invisible to any other
-headless `claude -p` invocation. No file = no flag = identical behavior to before this existed.
+mounts its servers alongside the builtin one via `--mcp-config --strict-mcp-config` (now always
+passed, since scheduling needs it too) — no code change needed. `--strict-mcp-config` means the
+builtin `schedule` server plus this file are the *only* source of MCP servers for the bot; a
+`claude mcp add --scope user` done interactively on the same box is invisible to it, same as
+it's invisible to any other headless `claude -p` invocation. No file = just the builtin
+`schedule` server, same as before this existed.
 
 ```json
 {

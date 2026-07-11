@@ -4,6 +4,13 @@
 a single in-place-updating Telegram message ("progress bubble") as it happens, and returns
 the final reply text. Persona via --append-system-prompt (SOUL.md); per-chat rolling session
 via --resume, retried once with a fresh session if a stale id fails to resume.
+
+Every turn also gets a *builtin* `schedule` MCP server (agent.mcp_schedule) — the only
+sanctioned way claude creates persistent reminders/scheduled tasks, since claude's built-in
+CronCreate is session-only and evaporates the instant this `-p` process exits. `_build_mcp_config`
+merges that in with any user-supplied mcp-config.json (see README's "Extra MCP servers"), writes
+the result to a per-chat runtime file, and --mcp-config/--strict-mcp-config is now always
+passed (previously conditional on mcp-config.json existing).
 """
 from __future__ import annotations
 
@@ -13,6 +20,7 @@ import json
 import logging
 import re
 import subprocess
+import sys
 import time
 
 from telegram.constants import ParseMode
@@ -21,6 +29,41 @@ from telegram.ext import ContextTypes
 from agent.config import Settings
 
 log = logging.getLogger("agent.claude")
+
+# Appended after the persona (or standalone if the persona is empty — a fork with no SOUL.md
+# still must not use CronCreate) on every turn. Keeps "how to schedule" out of SOUL.md, which
+# is the one file a fork is expected to touch — this instruction has to survive every fork
+# untouched, since it's the only thing standing between claude and a promise it can't keep.
+SCHEDULING_NOTE = (
+    "排程規則:任何「提醒我」「定時」「每天/每週跑一次」之類的需求,唯一機制是 "
+    "mcp__schedule__* 工具(schedule_add / schedule_list / schedule_edit / schedule_remove)。"
+    "排程由 bot 的長駐 process 持久保存,到點會在對應的聊天視窗自動跑一輪、把結果傳回去,"
+    "不受這次對話結束影響。絕對不要使用內建的 CronCreate / CronList —— 那只是這個 session "
+    "自己的記憶,只活在這一次 `claude -p` 呼叫裡,本輪一結束就蒸發,永遠不會真的觸發。也不要"
+    "自己去建 OS 層的 cron / at / systemd timer。"
+)
+
+
+def _build_mcp_config(settings: Settings, chat_id: int) -> dict:
+    """The `--mcp-config` payload for one turn: the builtin `schedule` server, merged with any
+    user-supplied mcp-config.json. The builtin entry is applied AFTER the user's servers so it
+    always wins on a name collision — a fork's mcp-config.json can't accidentally (or
+    deliberately) shadow the one thing every fork must keep working."""
+    servers: dict = {}
+    if settings.mcp_config_file.exists():
+        try:
+            user_cfg = json.loads(settings.mcp_config_file.read_text())
+            servers.update(user_cfg.get("mcpServers", {}))
+        except Exception as e:
+            log.warning("mcp-config.json unreadable, ignoring: %s", e)
+    if "schedule" in servers:
+        log.warning("mcp-config.json defines a 'schedule' server — overridden by the builtin scheduling MCP")
+    servers["schedule"] = {
+        "command": sys.executable,
+        "args": ["-m", "agent.mcp_schedule"],
+        "env": {"AGENT_HOME": str(settings.home), "AGENT_CHAT_ID": str(chat_id)},
+    }
+    return {"mcpServers": servers}
 
 
 def _tool_line(name: str, inp) -> str:
@@ -97,23 +140,29 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
     tool-use steps to a live-updating progress bubble as they happen. Retries once with a
     fresh session if a stale/expired session id fails to resume."""
     persona = settings.soul_file.read_text() if settings.soul_file.exists() else ""
+    system_prompt = f"{persona.strip()}\n\n{SCHEDULING_NOTE}" if persona.strip() else SCHEDULING_NOTE
     sf = settings.session_file(chat_id)
     bubble = ProgressBubble(context, chat_id)
+
+    # Written once per turn (not per retry attempt below — same chat_id, same config either
+    # way), so both the fresh-session retry and the first attempt point at the same file.
+    settings.run_dir.mkdir(exist_ok=True)
+    mcp_config_path = settings.run_dir / f"mcp-runtime-{chat_id}.json"
+    mcp_config_path.write_text(json.dumps(_build_mcp_config(settings, chat_id), ensure_ascii=False))
 
     async def _invoke(sid: str):
         cmd = [settings.claude_bin, "-p", prompt,
                "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-               "--permission-mode", "bypassPermissions"]
-        if persona.strip():
-            cmd += ["--append-system-prompt", persona]
-        if settings.mcp_config_file.exists():
-            # --strict-mcp-config: this is a non-interactive/headless invocation, so
-            # ~/.claude.json's user-scope mcpServers (if any exist on this box) must NOT
-            # silently leak in — the only servers available are the ones explicitly listed
-            # in mcp-config.json. No --allowedTools needed: --permission-mode
-            # bypassPermissions already trusts every tool, MCP or built-in, the same way it
-            # already does for Bash/Read/Write.
-            cmd += ["--mcp-config", str(settings.mcp_config_file), "--strict-mcp-config"]
+               "--permission-mode", "bypassPermissions",
+               "--append-system-prompt", system_prompt,
+               # --strict-mcp-config: this is a non-interactive/headless invocation, so
+               # ~/.claude.json's user-scope mcpServers (if any exist on this box) must NOT
+               # silently leak in — the only servers available are the ones listed in the
+               # runtime config this turn just wrote (builtin `schedule` + mcp-config.json, if
+               # any). No --allowedTools needed: --permission-mode bypassPermissions already
+               # trusts every tool, MCP or built-in, the same way it already does for
+               # Bash/Read/Write.
+               "--mcp-config", str(mcp_config_path), "--strict-mcp-config"]
         if sid:
             cmd += ["--resume", sid]
         proc = await asyncio.create_subprocess_exec(

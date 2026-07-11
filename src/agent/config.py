@@ -86,6 +86,12 @@ class Settings:
         return self.home / "run"
 
     @property
+    def schedules_file(self) -> Path:
+        # The one file schedule_store.py reads/writes — shared by the bot's own JobQueue tick
+        # and every `python -m agent.mcp_schedule` subprocess claude spawns per turn.
+        return self.run_dir / "schedules.json"
+
+    @property
     def outbox_dir(self) -> Path:
         # claude drops files here to have them sent back at the end of the turn.
         return self.run_dir / "outbox"

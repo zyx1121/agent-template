@@ -9,8 +9,11 @@ Anyone who can address the bot in an allow-listed group can drive claude on this
 the allow-list to groups whose members you trust with that.
 
 One message = one claude turn (`claude.run_turn`), serialized by an asyncio.Lock (a resumed
-session can't run concurrently). `_serve_turn` is the single place the turn lifecycle lives:
-ack reaction → streamed run (live progress bubble) + reply → drain OUTBOX → outcome reaction.
+session can't run concurrently). `_run_and_deliver` is the shared turn lifecycle (clear
+OUTBOX → streamed run + reply → drain OUTBOX); `_serve_turn` wraps it with the ack/outcome
+reactions for a real incoming message, and `_schedule_tick` (below, driven by PTB's JobQueue)
+wraps it with cron matching for a persisted schedule firing on its own — no message, so no
+reactions, but otherwise the exact same turn machinery.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime, timedelta
 
 from telegram import BotCommand, ReactionTypeEmoji, Update
 from telegram.constants import ChatType
@@ -34,7 +38,9 @@ from telegram.ext import (
 
 from agent.claude import run_turn
 from agent.config import Settings, load_settings, safe_name
+from agent.cron import cron_matches
 from agent.messaging import send_file, send_message
+from agent.schedule_store import list_schedules, remove_schedule
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
 # httpx logs each request URL at INFO — and PTB embeds the bot token in it. Pin to WARNING so
@@ -151,30 +157,110 @@ def _flush_outbox(settings: Settings, chat_id: int) -> list:
     return failed
 
 
+async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings) -> bool:
+    """One claude turn, end-to-end delivery: drop stale OUTBOX files from a crashed prior turn,
+    stream the turn (live progress bubble), send the reply, drain any files claude dropped in
+    OUTBOX this time. Caller must already hold `_lock` — this has no opinion on WHY the turn is
+    happening (an incoming message vs. a schedule firing on its own), only on running it safely
+    serialized with every other turn. Returns True on success, False if the turn itself errored."""
+    ok = True
+    await asyncio.to_thread(_clear_outbox, settings)
+    try:
+        reply = await run_turn(prompt, chat_id, context, settings)  # streams progress bubble
+    except subprocess.TimeoutExpired:
+        reply = f"⚠️ claude 逾時({settings.turn_timeout}s)"
+        ok = False
+    except Exception as e:
+        log.exception("claude turn failed")
+        reply = f"⚠️ claude 失敗:{e}"
+        ok = False
+    await asyncio.to_thread(send_message, settings.token, chat_id, reply)
+    failed = await asyncio.to_thread(_flush_outbox, settings, chat_id)
+    if failed:
+        await asyncio.to_thread(send_message, settings.token, chat_id,
+                                f"⚠️ {len(failed)} 個附件沒送成功(保留在 outbox,可稍後重試):{', '.join(failed)}")
+    return ok
+
+
 async def _serve_turn(msg, chat, context: ContextTypes.DEFAULT_TYPE, prompt: str) -> None:
-    """One claude turn end-to-end: ack reaction, streamed run (live progress bubble) + reply,
-    drain any files claude dropped in OUTBOX, outcome reaction. Shared by on_message and
-    on_media so the turn lifecycle lives in exactly one place."""
+    """One claude turn triggered by a real incoming message: ack reaction, the shared
+    run-and-deliver lifecycle, outcome reaction. Shared by on_message and on_media so the turn
+    lifecycle lives in exactly one place."""
     settings = _settings(context)
     async with _lock:  # serialize turns
         await _set_reaction(msg, random.choice(REACTIONS))  # "got it" ack
-        ok = True
-        await asyncio.to_thread(_clear_outbox, settings)  # drop stale files from a crashed prior turn
-        try:
-            reply = await run_turn(prompt, chat.id, context, settings)  # streams progress bubble
-        except subprocess.TimeoutExpired:
-            reply = f"⚠️ claude 逾時({settings.turn_timeout}s)"
-            ok = False
-        except Exception as e:
-            log.exception("claude turn failed")
-            reply = f"⚠️ claude 失敗:{e}"
-            ok = False
-        await asyncio.to_thread(send_message, settings.token, chat.id, reply)
-        failed = await asyncio.to_thread(_flush_outbox, settings, chat.id)
-        if failed:
-            await asyncio.to_thread(send_message, settings.token, chat.id,
-                                    f"⚠️ {len(failed)} 個附件沒送成功(保留在 outbox,可稍後重試):{', '.join(failed)}")
+        ok = await _run_and_deliver(prompt, chat.id, context, settings)
         await _set_reaction(msg, "👍" if ok else "👎")  # overwrite the ack with the outcome
+
+
+# --- persisted schedules (JobQueue tick) ------------------------------------------------
+
+_SCHEDULE_INTERVAL = 60  # seconds between ticks
+_CATCHUP_LIMIT = 5  # minutes; a longer in-process gap (event loop starved) still isn't backfilled past this
+
+_last_minute: datetime | None = None  # in-memory only — see _schedule_tick's docstring
+
+
+def _minute_floor(dt: datetime) -> datetime:
+    return dt.replace(second=0, microsecond=0)
+
+
+def _schedule_prompt(sched: dict, fired_at: datetime) -> str:
+    note = sched.get("note") or "(無)"
+    return (
+        f"[排程觸發 id={sched['id']} note={note} time={fired_at.strftime('%Y-%m-%d %H:%M')}]\n"
+        f"{sched['prompt']}"
+    )
+
+
+async def _schedule_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs every _SCHEDULE_INTERVAL seconds via JobQueue.run_repeating. Fires every enabled
+    schedule whose cron matches any whole minute in (last processed, now] — normally just the
+    one new minute, more if a slow tick let a couple slip by, capped at _CATCHUP_LIMIT.
+
+    `_last_minute` is in-memory only, by design: on a fresh process (restart, redeploy) it
+    starts as None and the first tick only evaluates the CURRENT minute — minutes missed while
+    the bot was down are never backfilled (README documents this). One accepted consequence:
+    if the bot restarts mid-minute, that minute can fire twice (once before the restart, once
+    on the first tick after) — not worth a persisted "last fired" ledger for a single-owner bot.
+    """
+    global _last_minute
+    settings = _settings(context)
+    now = _minute_floor(datetime.now())
+    if _last_minute is None:
+        _last_minute = now  # first tick since startup: no catch-up, only this minute
+    minutes_since = int((now - _last_minute).total_seconds() // 60)
+    if minutes_since <= 0:
+        pending = [now]
+    else:
+        pending = [_last_minute + timedelta(minutes=i)
+                   for i in range(1, min(minutes_since, _CATCHUP_LIMIT) + 1)]
+    _last_minute = now
+
+    schedules = await asyncio.to_thread(list_schedules, settings.schedules_file)
+    if not schedules:
+        return
+    for minute in pending:
+        for sched in schedules:
+            if not sched.get("enabled", True):
+                continue
+            try:
+                hit = cron_matches(sched["cron"], minute)
+            except Exception as e:
+                log.warning("schedule %s has an invalid cron %r, skipping: %s", sched["id"], sched.get("cron"), e)
+                continue
+            if not hit:
+                continue
+            log.info("schedule %s firing (cron=%s minute=%s)", sched["id"], sched["cron"], minute.isoformat())
+            try:
+                async with _lock:  # same serialization as a real message turn
+                    await _run_and_deliver(_schedule_prompt(sched, minute), sched["chat_id"], context, settings)
+            except Exception:
+                # A firing that blows up must not take the tick loop down with it — the next
+                # scheduled minute (or the next schedule in this same minute) still has to run.
+                log.exception("schedule %s tick failed", sched["id"])
+            if sched.get("once"):
+                await asyncio.to_thread(remove_schedule, settings.schedules_file, sched["id"])
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -327,6 +413,7 @@ def main() -> None:
     app.add_handler(MessageHandler(served & ~filters.TEXT, on_media))
     app.add_handler(MessageHandler(~served, on_unauthorized))
     app.add_error_handler(on_error)
+    app.job_queue.run_repeating(_schedule_tick, interval=_SCHEDULE_INTERVAL, first=10)
     log.info("%s bot starting (long-poll); owner=%s, allowed groups=%s",
              settings.agent_name, settings.owner_id, sorted(settings.allowed_groups) or "(none)")
     # Keep pending updates: messages sent while the bot was down must survive a restart.
