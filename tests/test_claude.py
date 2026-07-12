@@ -88,6 +88,22 @@ class IsNoReply(unittest.TestCase):
         self.assertFalse(is_no_reply(""))
         self.assertFalse(is_no_reply("all good"))
 
+    def test_padded_reply_ending_with_bare_sentinel_is_suppressed(self):
+        # Models occasionally pad a summary sentence despite the prompt — a trailing bare
+        # sentinel still means "do not deliver" (the leak that motivated this: 2026-07-12).
+        self.assertTrue(is_no_reply("No new mail, no account errors. Nothing worth reporting. NO_REPLY"))
+        self.assertTrue(is_no_reply("Nothing to report.\nNO_REPLY"))
+        self.assertTrue(is_no_reply("All quiet.\n\n  NO_REPLY  "))
+
+    def test_trailing_sentinel_needs_a_word_boundary(self):
+        self.assertFalse(is_no_reply("Set FOO_NO_REPLY"))
+        self.assertFalse(is_no_reply("status is OKNO_REPLY"))
+        self.assertFalse(is_no_reply("counted 3NO_REPLY"))
+
+    def test_sentinel_followed_by_text_or_punctuation_still_delivers(self):
+        self.assertFalse(is_no_reply("NO_REPLY — nothing to report today."))
+        self.assertFalse(is_no_reply("Nothing to report. NO_REPLY."))
+
 
 def _bubble_context() -> SimpleNamespace:
     sent = SimpleNamespace(message_id=999)
