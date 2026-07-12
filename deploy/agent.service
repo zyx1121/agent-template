@@ -1,5 +1,5 @@
 [Unit]
-Description=__AGENT_NAME__ — Telegram bot (single-user long-poll bridge)
+Description=__AGENT_DISPLAY_NAME__ — Telegram ↔ Claude agent (long-poll bot + persistent scheduler)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=60
