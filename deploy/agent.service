@@ -14,6 +14,12 @@ EnvironmentFile=__REPO_DIR__/.env
 ExecStart=__REPO_DIR__/.venv/bin/python -m agent
 Restart=always
 RestartSec=5
+# A deploy/restart must not kill an in-flight claude turn: SIGTERM goes to the bot process
+# only, PTB finishes the running handler (the turn completes and replies) before exiting.
+# The subprocess otherwise dies with exit 143 and the chat gets "claude failed". Only after
+# TimeoutStopSec does systemd SIGKILL the whole cgroup.
+KillMode=mixed
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
