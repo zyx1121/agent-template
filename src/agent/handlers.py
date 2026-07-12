@@ -42,7 +42,7 @@ from telegram.ext import (
     filters,
 )
 
-from agent.claude import is_no_reply, run_turn
+from agent.claude import NO_REPLY_SENTINEL, is_no_reply, run_turn
 from agent.config import Settings, load_settings, safe_name
 from agent.cron import cron_matches
 from agent.messaging import send_file, send_message
@@ -213,6 +213,9 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     if on_output_start:  # no-op if the bubble already fired it; covers the zero-tool-call case
         await on_output_start()
     if scheduled and is_no_reply(reply):
+        if reply.strip() != NO_REPLY_SENTINEL:
+            log.info("schedule turn NO_REPLY (suppressed, padded) chat_id=%s dropped=%r",
+                     chat_id, reply.strip()[:300])
         await _delete_progress_bubble(context, chat_id, bubble_message_id)
     else:
         await asyncio.to_thread(send_message, settings.token, chat_id, reply)

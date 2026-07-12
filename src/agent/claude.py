@@ -62,10 +62,19 @@ SCHEDULING_NOTE = (
 
 
 def is_no_reply(reply: str) -> bool:
-    """True iff `reply` is nothing but the NO_REPLY sentinel — the whole message, after
-    stripping surrounding whitespace, must match exactly (case-sensitive). A reply that merely
-    mentions the token, or wraps it in other words, is a normal reply and must still be sent."""
-    return reply.strip() == NO_REPLY_SENTINEL
+    """True iff `reply` signals suppression: the whole message (after stripping surrounding
+    whitespace) is exactly the NO_REPLY sentinel, or it *ends* with the bare sentinel at a word
+    boundary — models occasionally pad a summary sentence before the sentinel despite the
+    prompt, and a trailing bare token still unambiguously means "do not deliver". A reply that
+    merely mentions the token mid-text, or has it followed by punctuation, is a normal reply
+    and must still be sent. Callers that suppress a padded reply should log the dropped text."""
+    stripped = reply.strip()
+    if stripped == NO_REPLY_SENTINEL:
+        return True
+    if not stripped.endswith(NO_REPLY_SENTINEL):
+        return False
+    boundary = stripped[-len(NO_REPLY_SENTINEL) - 1]
+    return not (boundary.isalnum() or boundary == "_")
 
 
 def _build_mcp_config(settings: Settings, chat_id: int) -> dict:
