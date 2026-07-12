@@ -56,9 +56,16 @@ REPO_BASENAME="$(basename "$REPO_DIR")"
 SERVICE_NAME="${SERVICE_NAME:-$(printf '%s' "$REPO_BASENAME" | tr -c 'A-Za-z0-9_-' '-')}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
+# Unit Description shows the agent's display name (AGENT_NAME in .env, same value the bot
+# presents on Telegram), falling back to the unit name when unset. The name is escaped for
+# use in a sed replacement string (\, &, and the # delimiter), since it's arbitrary text.
+AGENT_DISPLAY_NAME="$(sed -n 's/^AGENT_NAME=//p' "$REPO_DIR/.env" | tail -1 | sed -e 's/^"\(.*\)"$/\1/')"
+AGENT_DISPLAY_NAME="${AGENT_DISPLAY_NAME:-$SERVICE_NAME}"
+AGENT_DISPLAY_NAME_ESCAPED="$(printf '%s' "$AGENT_DISPLAY_NAME" | sed -e 's/[\\#&]/\\&/g')"
+
 sed -e "s#__REPO_DIR__#$REPO_DIR#g" \
     -e "s#__RUN_USER__#$RUN_USER#g" \
-    -e "s#__AGENT_NAME__#$SERVICE_NAME#g" \
+    -e "s#__AGENT_DISPLAY_NAME__#$AGENT_DISPLAY_NAME_ESCAPED#g" \
     "$REPO_DIR/deploy/agent.service" | sudo tee "$UNIT_PATH" >/dev/null
 
 sudo systemctl daemon-reload
