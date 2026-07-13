@@ -92,6 +92,64 @@ class RunAndDeliverNoReply(unittest.IsolatedAsyncioTestCase):
         send_message.assert_not_called()
 
 
+class RunAndDeliverClaudeTurnError(unittest.IsolatedAsyncioTestCase):
+    """ClaudeTurnError handling — the fix for a failed turn surfacing the useless 'claude
+    exited 1'. A usage/session limit is an expected transient condition: a calm 🕐 notice on a
+    real user turn, and total silence on a scheduled firing (a monitoring tick must not repeat
+    the same limit notice every run until it resets). A non-limit error still surfaces as a
+    ⚠️ failure — but now carrying claude's real message, not a bare exit code."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.settings = _settings(Path(self._tmp.name))
+        self.context = _context()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    async def test_usage_limit_on_user_turn_sends_calm_notice(self):
+        err = handlers.ClaudeTurnError("You've hit your session limit · resets 1:50pm", is_usage_limit=True)
+        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
+             patch("agent.handlers.send_message") as send_message:
+            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings)
+        self.assertFalse(ok)
+        send_message.assert_called_once()
+        sent = send_message.call_args.args[2]
+        self.assertIn("session limit", sent)
+        self.assertNotIn("claude failed", sent)  # not framed as a crash
+
+    async def test_usage_limit_on_scheduled_turn_is_suppressed(self):
+        err = handlers.ClaudeTurnError("You've hit your session limit · resets 1:50pm", is_usage_limit=True)
+        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
+             patch("agent.handlers.send_message") as send_message:
+            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings, scheduled=True)
+        self.assertFalse(ok)
+        send_message.assert_not_called()  # a triage tick must not spam the limit notice
+        # run_turn raised before returning a bubble id, so there's nothing to delete — and a
+        # 429 fails before any tool step, so no progress bubble was ever sent anyway.
+        self.context.bot.delete_message.assert_not_awaited()
+
+    async def test_non_limit_error_surfaces_real_message_not_bare_exit_code(self):
+        err = handlers.ClaudeTurnError("boom: something specific broke", is_usage_limit=False)
+        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
+             patch("agent.handlers.send_message") as send_message:
+            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings)
+        self.assertFalse(ok)
+        sent = send_message.call_args.args[2]
+        self.assertIn("claude failed", sent)
+        self.assertIn("boom: something specific broke", sent)
+
+    async def test_non_limit_error_on_scheduled_turn_still_notifies(self):
+        # a genuine error (not a usage limit) is worth surfacing even on a scheduled tick —
+        # suppression is only for the expected/transient limit case.
+        err = handlers.ClaudeTurnError("real breakage", is_usage_limit=False)
+        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
+             patch("agent.handlers.send_message") as send_message:
+            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings, scheduled=True)
+        self.assertFalse(ok)
+        send_message.assert_called_once()
+
+
 class RunAndDeliverOnOutputStart(unittest.IsolatedAsyncioTestCase):
     """`on_output_start` — the generic turn-lifecycle hook the typing indicator is wired
     through (spec 2). `_run_and_deliver` has no idea it's "typing"; it just forwards the hook to

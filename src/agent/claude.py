@@ -61,6 +61,40 @@ SCHEDULING_NOTE = (
 )
 
 
+class ClaudeTurnError(RuntimeError):
+    """A claude turn that failed. `message` is the best human-readable reason available — the
+    stream-json result event's own text when present (e.g. "You've hit your session limit ·
+    resets 1:50pm"), else stderr, else a bare exit-code line. Previously such a failure raised
+    a plain `RuntimeError(stderr or "claude exited N")`, discarding the result event entirely —
+    so an empty-stderr failure (a 429 usage/session limit, which reports only via the result
+    event) surfaced to the user as the useless "claude exited 1". `is_usage_limit` flags an API
+    429 / usage-or-session limit so callers can treat it as an expected transient condition (a
+    calm notice, not an alarm; and a scheduled tick can stay quiet rather than repeat it every
+    firing) instead of a crash."""
+
+    def __init__(self, message: str, *, is_usage_limit: bool = False):
+        super().__init__(message)
+        self.message = message
+        self.is_usage_limit = is_usage_limit
+
+
+def _result_message(result_event: dict | None, stderr: str, returncode: int) -> str:
+    """Best available failure reason: the result event's own text first (that's where claude
+    puts a usage-limit / auth / api error), then stderr, then a bare exit line."""
+    if result_event:
+        msg = (result_event.get("result") or "").strip()
+        if msg:
+            return msg[:500]
+    return stderr.strip()[:500] or f"claude exited {returncode}"
+
+
+def _is_usage_limit(result_event: dict | None, message: str) -> bool:
+    """A 429 (api_error_status) or a message that names a usage/session/rate limit."""
+    if result_event and result_event.get("api_error_status") == 429:
+        return True
+    return bool(re.search(r"(usage|session|rate)[ -]?limit", message, re.I))
+
+
 def is_no_reply(reply: str) -> bool:
     """True iff `reply` signals suppression: the whole message (after stripping surrounding
     whitespace) is exactly the NO_REPLY sentinel, or it *ends* with the bare sentinel at a word
@@ -270,14 +304,24 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
         except asyncio.TimeoutError:
             raise subprocess.TimeoutExpired(settings.claude_bin, settings.turn_timeout)
 
+    def _is_stale(sderr: str, ev: dict | None) -> bool:
+        # the "session expired, start fresh" signal used to land only in stderr; check the
+        # result event's text too, since a failure's message now lives there just as often.
+        hay = f"{sderr or ''} {(ev or {}).get('result') or ''}"
+        return bool(re.search(r"no (conversation|rollout) found", hay, re.I))
+
     sid = sf.read_text().strip() if sf.exists() else ""
     returncode, result_event, stderr = await _invoke_timed(sid)
-    if returncode != 0 and sid and re.search(r"no (conversation|rollout) found", stderr, re.I):
+    if returncode != 0 and sid and _is_stale(stderr, result_event):
         sf.unlink(missing_ok=True)  # stale session — start fresh
         returncode, result_event, stderr = await _invoke_timed("")
     await bubble.finish()
-    if returncode != 0:
-        raise RuntimeError(stderr.strip()[:500] or f"claude exited {returncode}")
+    # A turn failed if claude exited non-zero OR the result event itself is flagged is_error
+    # (a 429 usage/session limit reports subtype="success" but is_error=true — don't trust
+    # returncode or subtype alone). Surface the result event's own message, not a bare exit code.
+    if returncode != 0 or (result_event is not None and result_event.get("is_error")):
+        message = _result_message(result_event, stderr, returncode)
+        raise ClaudeTurnError(message, is_usage_limit=_is_usage_limit(result_event, message))
     if result_event is None:
         raise RuntimeError("claude stream ended without a result event")
     new_sid = result_event.get("session_id", "")

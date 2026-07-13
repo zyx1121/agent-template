@@ -12,7 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from agent.claude import NO_REPLY_SENTINEL, ProgressBubble, _build_mcp_config, is_no_reply
+from agent.claude import (
+    NO_REPLY_SENTINEL,
+    ClaudeTurnError,
+    ProgressBubble,
+    _build_mcp_config,
+    _is_usage_limit,
+    _result_message,
+    is_no_reply,
+)
 from agent.config import Settings
 
 
@@ -111,6 +119,42 @@ def _bubble_context() -> SimpleNamespace:
         send_message=AsyncMock(return_value=sent),
         edit_message_text=AsyncMock(),
     ))
+
+
+class ResultMessageAndUsageLimit(unittest.TestCase):
+    """The failure-reason extraction that fixes 'claude exited 1' hiding the real cause: a
+    turn's message should come from the stream-json result event first (that's where a
+    usage/session-limit or auth error actually reports), with stderr / a bare exit line only as
+    fallbacks — and a 429 or a limit-worded message must be recognized as a usage limit."""
+
+    def test_result_event_text_preferred_over_stderr(self):
+        ev = {"result": "You've hit your session limit · resets 1:50pm (Asia/Taipei)"}
+        self.assertEqual(
+            _result_message(ev, "some stderr noise", 1),
+            "You've hit your session limit · resets 1:50pm (Asia/Taipei)")
+
+    def test_falls_back_to_stderr_when_no_result_text(self):
+        self.assertEqual(_result_message({"result": ""}, "boom on stderr", 1), "boom on stderr")
+
+    def test_falls_back_to_bare_exit_line_when_nothing_else(self):
+        self.assertEqual(_result_message(None, "", 1), "claude exited 1")
+
+    def test_429_status_is_a_usage_limit(self):
+        self.assertTrue(_is_usage_limit({"api_error_status": 429}, "anything"))
+
+    def test_limit_worded_message_is_a_usage_limit_even_without_429(self):
+        self.assertTrue(_is_usage_limit(None, "You've hit your session limit · resets 1:50pm"))
+        self.assertTrue(_is_usage_limit(None, "usage limit reached"))
+
+    def test_ordinary_error_is_not_a_usage_limit(self):
+        self.assertFalse(_is_usage_limit({"api_error_status": 500}, "internal error"))
+        self.assertFalse(_is_usage_limit(None, "claude exited 1"))
+
+    def test_error_carries_message_and_flag(self):
+        e = ClaudeTurnError("hit session limit", is_usage_limit=True)
+        self.assertEqual(e.message, "hit session limit")
+        self.assertTrue(e.is_usage_limit)
+        self.assertIn("hit session limit", str(e))
 
 
 class ProgressBubbleOnFirstSend(unittest.IsolatedAsyncioTestCase):
