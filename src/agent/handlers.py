@@ -42,7 +42,7 @@ from telegram.ext import (
     filters,
 )
 
-from agent.claude import NO_REPLY_SENTINEL, is_no_reply, run_turn
+from agent.claude import NO_REPLY_SENTINEL, ClaudeTurnError, is_no_reply, run_turn
 from agent.config import Settings, load_settings, safe_name
 from agent.cron import cron_matches
 from agent.messaging import send_file, send_message
@@ -231,6 +231,7 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     (`_serve_turn` uses it to stop the typing indicator) — it's a generic turn-lifecycle signal,
     not a typing-indicator concept, and `_schedule_tick` never passes one."""
     ok = True
+    suppress = False  # deliver nothing (delete the bubble) even on a non-NO_REPLY reply
     await asyncio.to_thread(_clear_outbox, settings)
     bubble_message_id = None
     try:
@@ -239,14 +240,27 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
     except subprocess.TimeoutExpired:
         reply = f"⚠️ claude timed out ({settings.turn_timeout}s)"
         ok = False
+    except ClaudeTurnError as e:
+        ok = False
+        if e.is_usage_limit:
+            # Expected transient condition, not a crash: surface claude's own notice (e.g.
+            # "You've hit your session limit · resets 1:50pm") calmly on a real user turn. On a
+            # scheduled firing, stay quiet — a monitoring tick (mail-triage every 30 min) must
+            # not repeat the same limit notice every firing until it resets.
+            log.warning("claude usage/session limit (chat_id=%s): %s", chat_id, e.message)
+            reply = f"🕐 {e.message}"
+            suppress = scheduled
+        else:
+            log.exception("claude turn failed")
+            reply = f"⚠️ claude failed: {e.message}"
     except Exception as e:
         log.exception("claude turn failed")
         reply = f"⚠️ claude failed: {e}"
         ok = False
     if on_output_start:  # no-op if the bubble already fired it; covers the zero-tool-call case
         await on_output_start()
-    if scheduled and is_no_reply(reply):
-        if reply.strip() != NO_REPLY_SENTINEL:
+    if suppress or (scheduled and is_no_reply(reply)):
+        if not suppress and reply.strip() != NO_REPLY_SENTINEL:
             log.info("schedule turn NO_REPLY (suppressed, padded) chat_id=%s dropped=%r",
                      chat_id, reply.strip()[:300])
         await _delete_progress_bubble(context, chat_id, bubble_message_id)
