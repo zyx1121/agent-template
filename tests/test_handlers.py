@@ -93,11 +93,11 @@ class RunAndDeliverNoReply(unittest.IsolatedAsyncioTestCase):
 
 
 class RunAndDeliverClaudeTurnError(unittest.IsolatedAsyncioTestCase):
-    """ClaudeTurnError handling — the fix for a failed turn surfacing the useless 'claude
-    exited 1'. A usage/session limit is an expected transient condition: a calm 🕐 notice on a
-    real user turn, and total silence on a scheduled firing (a monitoring tick must not repeat
-    the same limit notice every run until it resets). A non-limit error still surfaces as a
-    ⚠️ failure — but now carrying claude's real message, not a bare exit code."""
+    """ClaudeTurnError handling per category (the fix for a failed turn showing the useless
+    'claude exited 1'). usage_limit / transient are expected & self-healing → calm notice, and
+    suppressed on a scheduled tick (a monitoring firing must not repeat them every run). auth
+    won't self-heal → surfaced everywhere, scheduled included. generic → ⚠️ failure with
+    claude's real message."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -107,45 +107,61 @@ class RunAndDeliverClaudeTurnError(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    async def test_usage_limit_on_user_turn_sends_calm_notice(self):
-        err = handlers.ClaudeTurnError("You've hit your session limit · resets 1:50pm", is_usage_limit=True)
+    def _err(self, message, category):
+        return handlers.ClaudeTurnError(message, category=category)
+
+    async def _run(self, err, *, scheduled=False):
         with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
              patch("agent.handlers.send_message") as send_message:
-            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings)
+            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings, scheduled=scheduled)
+        return ok, send_message
+
+    async def test_usage_limit_on_user_turn_sends_calm_notice(self):
+        ok, send_message = await self._run(self._err("You've hit your session limit · resets 1:50pm", "usage_limit"))
         self.assertFalse(ok)
-        send_message.assert_called_once()
         sent = send_message.call_args.args[2]
         self.assertIn("session limit", sent)
         self.assertNotIn("claude failed", sent)  # not framed as a crash
 
     async def test_usage_limit_on_scheduled_turn_is_suppressed(self):
-        err = handlers.ClaudeTurnError("You've hit your session limit · resets 1:50pm", is_usage_limit=True)
-        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
-             patch("agent.handlers.send_message") as send_message:
-            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings, scheduled=True)
+        ok, send_message = await self._run(self._err("session limit · resets 1:50pm", "usage_limit"), scheduled=True)
         self.assertFalse(ok)
         send_message.assert_not_called()  # a triage tick must not spam the limit notice
-        # run_turn raised before returning a bubble id, so there's nothing to delete — and a
-        # 429 fails before any tool step, so no progress bubble was ever sent anyway.
-        self.context.bot.delete_message.assert_not_awaited()
 
-    async def test_non_limit_error_surfaces_real_message_not_bare_exit_code(self):
-        err = handlers.ClaudeTurnError("boom: something specific broke", is_usage_limit=False)
-        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
-             patch("agent.handlers.send_message") as send_message:
-            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings)
+    async def test_transient_on_user_turn_sends_calm_notice(self):
+        ok, send_message = await self._run(self._err("API Error: 529 Overloaded", "transient"))
+        self.assertFalse(ok)
+        sent = send_message.call_args.args[2]
+        self.assertIn("temporarily unavailable", sent)
+        self.assertNotIn("claude failed", sent)
+
+    async def test_transient_on_scheduled_turn_is_suppressed(self):
+        ok, send_message = await self._run(self._err("503 upstream", "transient"), scheduled=True)
+        self.assertFalse(ok)
+        send_message.assert_not_called()  # blip self-heals; next tick retries
+
+    async def test_auth_is_surfaced_on_user_turn_with_refresh_hint(self):
+        ok, send_message = await self._run(self._err("401 Invalid bearer token", "auth"))
+        self.assertFalse(ok)
+        sent = send_message.call_args.args[2]
+        self.assertIn("authentication", sent.lower())
+        self.assertIn("refresh", sent.lower())
+
+    async def test_auth_is_NOT_suppressed_on_scheduled_turn(self):
+        # a dead token won't self-heal — a scheduled tick must still alert, not go silent.
+        ok, send_message = await self._run(self._err("401 Invalid bearer token", "auth"), scheduled=True)
+        self.assertFalse(ok)
+        send_message.assert_called_once()
+
+    async def test_generic_error_surfaces_real_message_not_bare_exit_code(self):
+        ok, send_message = await self._run(self._err("boom: something specific broke", "error"))
         self.assertFalse(ok)
         sent = send_message.call_args.args[2]
         self.assertIn("claude failed", sent)
         self.assertIn("boom: something specific broke", sent)
 
-    async def test_non_limit_error_on_scheduled_turn_still_notifies(self):
-        # a genuine error (not a usage limit) is worth surfacing even on a scheduled tick —
-        # suppression is only for the expected/transient limit case.
-        err = handlers.ClaudeTurnError("real breakage", is_usage_limit=False)
-        with patch("agent.handlers.run_turn", new=AsyncMock(side_effect=err)), \
-             patch("agent.handlers.send_message") as send_message:
-            ok = await handlers._run_and_deliver("prompt", 42, self.context, self.settings, scheduled=True)
+    async def test_generic_error_on_scheduled_turn_still_notifies(self):
+        ok, send_message = await self._run(self._err("real breakage", "error"), scheduled=True)
         self.assertFalse(ok)
         send_message.assert_called_once()
 
