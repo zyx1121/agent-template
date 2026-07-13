@@ -188,6 +188,19 @@ allow-listed group can drive `claude` on the host — only add groups whose memb
 - **Typing indicator** — a real message gets an immediate "typing…" that's kept alive until the
   turn's first outbound message appears (progress bubble or reply, whichever comes first), then
   stops for good. Scheduled firings never trigger it — no one's waiting on those.
+- **Reply / quote context** — when a message is a Telegram *reply* to an earlier one, the
+  replied-to message (or, if the user hand-selected part of it, just that quoted fragment) is
+  threaded into the prompt as context. So a user can point at a specific earlier message —
+  "reply to that notification and say: done" — and `claude` knows which one, re-injected every
+  turn regardless of session memory (works in a fresh session, hours later).
+- **Graceful failure handling** — when a `claude -p` turn fails, the bot surfaces the *real*
+  reason from the run's result event (a usage limit, an auth error, an API 5xx) instead of a
+  bare "claude exited 1", and categorizes it: a **usage limit** (429) or a **transient** blip
+  (408 / 5xx / 529 / network) gets a calm notice and stays silent on a scheduled tick (it
+  self-heals, and a monitoring firing shouldn't repeat it every run); an **auth** failure
+  (401 / 403) gets a "token likely needs refreshing" notice and is surfaced *everywhere*,
+  scheduled ticks included, since a dead token won't fix itself; anything else is reported as a
+  genuine failure with claude's own message.
 
 ## Scheduling
 
