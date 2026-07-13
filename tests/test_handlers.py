@@ -197,5 +197,57 @@ class ScheduledTurnNeverTypes(unittest.IsolatedAsyncioTestCase):
         self.context.bot.send_chat_action.assert_not_awaited()
 
 
+class ReplyContextTest(unittest.TestCase):
+    """`_reply_context` — turns a Telegram reply/quote on the incoming message into a prompt
+    prefix so claude knows which earlier message the user is pointing at. Pure function; fakes
+    are SimpleNamespace mirroring the telegram.Message fields it reads."""
+
+    BOT_ID = 999
+
+    def _msg(self, *, reply_text=None, reply_caption=None, reply_from_id=None, quote_text=None):
+        reply = None
+        if reply_text is not None or reply_caption is not None or reply_from_id is not None:
+            reply = SimpleNamespace(
+                text=reply_text, caption=reply_caption,
+                from_user=SimpleNamespace(id=reply_from_id) if reply_from_id is not None else None)
+        quote = SimpleNamespace(text=quote_text) if quote_text is not None else None
+        return SimpleNamespace(reply_to_message=reply, quote=quote)
+
+    def test_not_a_reply_returns_empty(self):
+        self.assertEqual(handlers._reply_context(self._msg(), self.BOT_ID), "")
+
+    def test_reply_to_bot_message_labels_it_as_ours_and_includes_text(self):
+        out = handlers._reply_context(
+            self._msg(reply_text="mail uid 496: 老師問 meeting 時間", reply_from_id=self.BOT_ID), self.BOT_ID)
+        self.assertIn("your own earlier message", out)
+        self.assertIn("uid 496", out)
+        self.assertTrue(out.endswith("\n\n"))  # trailing blank line so it prepends cleanly
+
+    def test_reply_to_someone_elses_message(self):
+        out = handlers._reply_context(
+            self._msg(reply_text="hi", reply_from_id=12345), self.BOT_ID)
+        self.assertIn("an earlier message", out)
+        self.assertNotIn("your own", out)
+
+    def test_manual_quote_fragment_is_preferred_over_full_message(self):
+        out = handlers._reply_context(
+            self._msg(reply_text="line A\nline B (uid 7)\nline C", reply_from_id=self.BOT_ID,
+                      quote_text="line B (uid 7)"), self.BOT_ID)
+        self.assertIn("quoted part", out)
+        self.assertIn("line B (uid 7)", out)
+        self.assertNotIn("line A", out)
+
+    def test_caption_used_when_replied_to_message_has_no_text(self):
+        out = handlers._reply_context(
+            self._msg(reply_caption="photo caption here", reply_from_id=self.BOT_ID), self.BOT_ID)
+        self.assertIn("photo caption here", out)
+
+    def test_long_quoted_text_is_truncated(self):
+        out = handlers._reply_context(
+            self._msg(reply_text="x" * 5000, reply_from_id=self.BOT_ID), self.BOT_ID)
+        self.assertIn("…(truncated)", out)
+        self.assertLess(len(out), 5000)
+
+
 if __name__ == "__main__":
     unittest.main()
