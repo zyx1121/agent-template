@@ -42,7 +42,15 @@ from telegram.ext import (
     filters,
 )
 
-from agent.claude import NO_REPLY_SENTINEL, ClaudeTurnError, is_no_reply, run_turn
+from agent.claude import (
+    ERR_AUTH,
+    ERR_TRANSIENT,
+    ERR_USAGE_LIMIT,
+    NO_REPLY_SENTINEL,
+    ClaudeTurnError,
+    is_no_reply,
+    run_turn,
+)
 from agent.config import Settings, load_settings, safe_name
 from agent.cron import cron_matches
 from agent.messaging import send_file, send_message
@@ -210,6 +218,24 @@ async def _delete_progress_bubble(context: ContextTypes.DEFAULT_TYPE, chat_id: i
         log.warning("progress bubble delete failed: %s", e)
 
 
+def _error_reply(err: ClaudeTurnError, scheduled: bool) -> tuple[str, bool]:
+    """Map a categorized turn failure to (reply text, suppress?) — the per-category delivery
+    policy. Suppress means: on a scheduled tick, deliver nothing (delete the bubble) instead of
+    the reply, so a monitoring firing doesn't repeat a transient/expected condition every run.
+      - usage_limit / transient: expected & self-healing → calm notice; suppressed on a
+        scheduled tick (a user turn still gets told why nothing happened).
+      - auth: the token needs refreshing — won't self-heal, so surface it EVERYWHERE, scheduled
+        included (a silently-dead agent is worse than a repeated nag).
+      - generic: a real unexpected failure → surface everywhere, with claude's real message."""
+    if err.category == ERR_USAGE_LIMIT:
+        return f"🕐 {err.message}", scheduled
+    if err.category == ERR_TRANSIENT:
+        return f"⏳ Claude is temporarily unavailable — try again shortly.\n({err.message})", scheduled
+    if err.category == ERR_AUTH:
+        return f"🔑 Claude authentication failed — the token likely needs refreshing.\n({err.message})", False
+    return f"⚠️ claude failed: {err.message}", False
+
+
 async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, settings: Settings,
                             *, scheduled: bool = False,
                             on_output_start: Callable[[], Awaitable[None]] | None = None) -> bool:
@@ -242,17 +268,14 @@ async def _run_and_deliver(prompt: str, chat_id: int, context: ContextTypes.DEFA
         ok = False
     except ClaudeTurnError as e:
         ok = False
-        if e.is_usage_limit:
-            # Expected transient condition, not a crash: surface claude's own notice (e.g.
-            # "You've hit your session limit · resets 1:50pm") calmly on a real user turn. On a
-            # scheduled firing, stay quiet — a monitoring tick (mail-triage every 30 min) must
-            # not repeat the same limit notice every firing until it resets.
-            log.warning("claude usage/session limit (chat_id=%s): %s", chat_id, e.message)
-            reply = f"🕐 {e.message}"
-            suppress = scheduled
-        else:
+        reply, suppress = _error_reply(e, scheduled)
+        # A generic (unclassified) failure is a real bug — log with traceback. A categorized
+        # one (limit/auth/transient) is an expected operational condition — a warning line,
+        # no scary stack trace.
+        if e.category == "error":
             log.exception("claude turn failed")
-            reply = f"⚠️ claude failed: {e.message}"
+        else:
+            log.warning("claude turn error [%s] chat_id=%s: %s", e.category, chat_id, e.message)
     except Exception as e:
         log.exception("claude turn failed")
         reply = f"⚠️ claude failed: {e}"

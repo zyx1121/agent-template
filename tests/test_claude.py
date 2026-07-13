@@ -13,11 +13,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from agent.claude import (
+    ERR_AUTH,
+    ERR_GENERIC,
+    ERR_TRANSIENT,
+    ERR_USAGE_LIMIT,
     NO_REPLY_SENTINEL,
     ClaudeTurnError,
     ProgressBubble,
     _build_mcp_config,
-    _is_usage_limit,
+    _classify_error,
     _result_message,
     is_no_reply,
 )
@@ -121,11 +125,12 @@ def _bubble_context() -> SimpleNamespace:
     ))
 
 
-class ResultMessageAndUsageLimit(unittest.TestCase):
-    """The failure-reason extraction that fixes 'claude exited 1' hiding the real cause: a
-    turn's message should come from the stream-json result event first (that's where a
-    usage/session-limit or auth error actually reports), with stderr / a bare exit line only as
-    fallbacks — and a 429 or a limit-worded message must be recognized as a usage limit."""
+class ResultMessageAndClassify(unittest.TestCase):
+    """The failure-reason extraction + categorization that fixes 'claude exited 1' hiding the
+    real cause. `_result_message` takes the stream-json result event's own text first (that's
+    where a limit / auth / api error reports), stderr / a bare exit line only as fallbacks.
+    `_classify_error` buckets by api_error_status (live-confirmed: 429 limit, 401 auth) with
+    message-text fallbacks."""
 
     def test_result_event_text_preferred_over_stderr(self):
         ev = {"result": "You've hit your session limit · resets 1:50pm (Asia/Taipei)"}
@@ -139,22 +144,37 @@ class ResultMessageAndUsageLimit(unittest.TestCase):
     def test_falls_back_to_bare_exit_line_when_nothing_else(self):
         self.assertEqual(_result_message(None, "", 1), "claude exited 1")
 
-    def test_429_status_is_a_usage_limit(self):
-        self.assertTrue(_is_usage_limit({"api_error_status": 429}, "anything"))
+    def test_classify_usage_limit_by_429_or_text(self):
+        self.assertEqual(_classify_error({"api_error_status": 429}, "anything"), ERR_USAGE_LIMIT)
+        self.assertEqual(_classify_error(None, "You've hit your session limit · resets 1:50pm"), ERR_USAGE_LIMIT)
+        self.assertEqual(_classify_error(None, "usage limit reached"), ERR_USAGE_LIMIT)
 
-    def test_limit_worded_message_is_a_usage_limit_even_without_429(self):
-        self.assertTrue(_is_usage_limit(None, "You've hit your session limit · resets 1:50pm"))
-        self.assertTrue(_is_usage_limit(None, "usage limit reached"))
+    def test_classify_auth_by_401_403_or_text(self):
+        self.assertEqual(_classify_error({"api_error_status": 401}, "Failed to authenticate. API Error: 401 Invalid bearer token"), ERR_AUTH)
+        self.assertEqual(_classify_error({"api_error_status": 403}, "forbidden"), ERR_AUTH)
+        self.assertEqual(_classify_error(None, "Not logged in · Please run /login"), ERR_AUTH)
 
-    def test_ordinary_error_is_not_a_usage_limit(self):
-        self.assertFalse(_is_usage_limit({"api_error_status": 500}, "internal error"))
-        self.assertFalse(_is_usage_limit(None, "claude exited 1"))
+    def test_classify_transient_by_5xx_529_or_text(self):
+        for s in (408, 500, 502, 503, 504, 529):
+            self.assertEqual(_classify_error({"api_error_status": s}, "x"), ERR_TRANSIENT, f"status {s}")
+        self.assertEqual(_classify_error(None, "Overloaded"), ERR_TRANSIENT)
+        self.assertEqual(_classify_error(None, "connection reset by peer"), ERR_TRANSIENT)
 
-    def test_error_carries_message_and_flag(self):
-        e = ClaudeTurnError("hit session limit", is_usage_limit=True)
+    def test_classify_generic_when_nothing_matches(self):
+        self.assertEqual(_classify_error(None, "claude exited 1"), ERR_GENERIC)
+        self.assertEqual(_classify_error({"api_error_status": 400}, "bad request"), ERR_GENERIC)
+
+    def test_429_wins_over_transient_text(self):
+        # a 429 whose message also mentions a timeout must stay usage_limit, not transient
+        self.assertEqual(_classify_error({"api_error_status": 429}, "rate limit; connection slow"), ERR_USAGE_LIMIT)
+
+    def test_error_carries_message_and_category(self):
+        e = ClaudeTurnError("hit session limit", category=ERR_USAGE_LIMIT)
         self.assertEqual(e.message, "hit session limit")
+        self.assertEqual(e.category, ERR_USAGE_LIMIT)
         self.assertTrue(e.is_usage_limit)
         self.assertIn("hit session limit", str(e))
+        self.assertFalse(ClaudeTurnError("x", category=ERR_AUTH).is_usage_limit)
 
 
 class ProgressBubbleOnFirstSend(unittest.IsolatedAsyncioTestCase):

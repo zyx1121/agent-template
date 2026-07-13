@@ -61,21 +61,34 @@ SCHEDULING_NOTE = (
 )
 
 
+# Failure categories (ClaudeTurnError.category), each with its own delivery policy in
+# handlers._error_reply — see there for the user-turn message and scheduled-tick suppression.
+ERR_USAGE_LIMIT = "usage_limit"  # 429 / session|rate limit — wait, resets on its own
+ERR_AUTH = "auth"                # 401/403 — the token needs refreshing (needs Loki's action)
+ERR_TRANSIENT = "transient"      # 408/5xx/529 / overloaded / network — retryable blip
+ERR_GENERIC = "error"            # anything else — a real, unexpected failure
+
+
 class ClaudeTurnError(RuntimeError):
     """A claude turn that failed. `message` is the best human-readable reason available — the
     stream-json result event's own text when present (e.g. "You've hit your session limit ·
     resets 1:50pm"), else stderr, else a bare exit-code line. Previously such a failure raised
     a plain `RuntimeError(stderr or "claude exited N")`, discarding the result event entirely —
-    so an empty-stderr failure (a 429 usage/session limit, which reports only via the result
-    event) surfaced to the user as the useless "claude exited 1". `is_usage_limit` flags an API
-    429 / usage-or-session limit so callers can treat it as an expected transient condition (a
-    calm notice, not an alarm; and a scheduled tick can stay quiet rather than repeat it every
-    firing) instead of a crash."""
+    so an empty-stderr failure (a 429 limit, or a 401 auth error — both report only via the
+    result event) surfaced as the useless "claude exited 1".
 
-    def __init__(self, message: str, *, is_usage_limit: bool = False):
+    `category` is one of the ERR_* constants above; callers key their delivery policy on it
+    (calm notice vs alarm; suppress on a scheduled tick vs always surface). `is_usage_limit`
+    stays as a convenience property over `category` for older call sites."""
+
+    def __init__(self, message: str, *, category: str = ERR_GENERIC):
         super().__init__(message)
         self.message = message
-        self.is_usage_limit = is_usage_limit
+        self.category = category
+
+    @property
+    def is_usage_limit(self) -> bool:
+        return self.category == ERR_USAGE_LIMIT
 
 
 def _result_message(result_event: dict | None, stderr: str, returncode: int) -> str:
@@ -88,11 +101,22 @@ def _result_message(result_event: dict | None, stderr: str, returncode: int) -> 
     return stderr.strip()[:500] or f"claude exited {returncode}"
 
 
-def _is_usage_limit(result_event: dict | None, message: str) -> bool:
-    """A 429 (api_error_status) or a message that names a usage/session/rate limit."""
-    if result_event and result_event.get("api_error_status") == 429:
-        return True
-    return bool(re.search(r"(usage|session|rate)[ -]?limit", message, re.I))
+def _classify_error(result_event: dict | None, message: str) -> str:
+    """Bucket a failure into an ERR_* category, keyed first on the result event's HTTP
+    `api_error_status` (present for API errors — 429/401/5xx, live-confirmed) with message-text
+    fallbacks for the cases that report only as prose. Order matters: a 429 that also says
+    'rate limit' is a usage limit, not transient."""
+    status = (result_event or {}).get("api_error_status")
+    if status == 429 or re.search(r"(usage|session|rate)[ -]?limit", message, re.I):
+        return ERR_USAGE_LIMIT
+    if status in (401, 403) or re.search(
+            r"not logged in|please run /login|invalid bearer|failed to authenticate|authentication",
+            message, re.I):
+        return ERR_AUTH
+    if status in (408, 500, 502, 503, 504, 529) or re.search(
+            r"overloaded|temporarily unavailable|timed? ?out|connection|network|econn", message, re.I):
+        return ERR_TRANSIENT
+    return ERR_GENERIC
 
 
 def is_no_reply(reply: str) -> bool:
@@ -321,7 +345,7 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
     # returncode or subtype alone). Surface the result event's own message, not a bare exit code.
     if returncode != 0 or (result_event is not None and result_event.get("is_error")):
         message = _result_message(result_event, stderr, returncode)
-        raise ClaudeTurnError(message, is_usage_limit=_is_usage_limit(result_event, message))
+        raise ClaudeTurnError(message, category=_classify_error(result_event, message))
     if result_event is None:
         raise RuntimeError("claude stream ended without a result event")
     new_sid = result_event.get("session_id", "")
