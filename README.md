@@ -1,22 +1,67 @@
 # agent-template
 
-Minimal Telegram ↔ Claude Code bridge: one owner, one bot, one rolling `claude -p`
-conversation. Long-polling only (no webhook, no open port), **single-owner** (the owner is
-always served; allow-listed groups are opt-in), single process (`python -m agent`). This repo
-is a **GitHub template** — fork it, swap the persona, deploy.
+> Wiring a new Telegram bot to Claude Code is the same afternoon every time. Fork this once, and it's already done.
 
-## How this template is meant to be used
+`telegram` · `claude-code` · `python` · `template` · `automation`
 
-There's deliberately no `create-agent` CLI or skill. Spinning up a new agent is a
-handful of one-off steps — fork, write a persona, collect three tokens, deploy — that
-don't recur often enough to justify freezing into a tool, and the deploy step differs
-per target anyway.
+[![version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fzyx1121%2Fagent-template%2Fmain%2Fpyproject.toml&query=%24.project.version&label=version&color=111111)](pyproject.toml) &nbsp;[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-The intended flow: hand this repo to a coding agent (Claude Code, etc.) and say *"open
-me a new agent from this template."* The sections below double as a **runbook for that
-agent** — it drives the mechanical parts (fork, edit `SOUL.md`, fill `.env`, run the
-deploy) and pauses for the parts only a human can do (approve the bot in @BotFather,
-run `claude setup-token` in a browser).
+```
+> "check the deploy log and tell me if it's healthy"
+  ⚡️ systemctl status agent
+  📖 deploy/agent.service
+✓ Service active, restarted 2 hours ago
+```
+
+<sub>One Telegram message, live-updated with every tool call, then the final reply.</sub>
+
+Every new bot idea starts with the same three chores: wire up Telegram, wire up Claude Code headlessly, wire up something that remembers reminders after the process exits. This repo is that wiring, done once, with the fiddly parts (session resumption, group @-mention gating, a live progress bubble, persistent scheduling) already handled. Reskinning it into a new agent means editing one file (`SOUL.md`) and collecting three tokens; the rest of `src/agent/` stays untouched.
+
+## Fork it
+
+There's deliberately no `create-agent` CLI: opening a new agent is a handful of one-off steps that don't recur often enough to freeze into a tool, and the deploy step differs per target anyway. The steps below also work as a runbook you can hand straight to a coding agent ("open me a new agent from this template"): it drives every mechanical part and only pauses for the two steps a human has to do (approving the bot in @BotFather, running `claude setup-token` in a browser).
+
+```bash
+gh repo create <your-agent-name> --template zyx1121/agent-template --private --clone
+cd <your-agent-name>
+cp .env.example .env
+```
+
+1. **Write the persona** in `SOUL.md`, the only file a fork is expected to touch (injected as the system prompt every turn via `claude -p --append-system-prompt`). `src/agent/` stays as-is.
+2. **Get a bot token**: [@BotFather](https://t.me/BotFather) → `/newbot` → `TELEGRAM_BOT_TOKEN`. While there, `/setprivacy` → select the bot → **Disable** (skip this and group @-mentions silently never reach the bot, see **Groups**).
+3. **Get your user id**: [@userinfobot](https://t.me/userinfobot) → `OWNER_USER_ID`, the trust anchor: always served, everyone else ignored unless allow-listed.
+4. **Get a Claude Code OAuth token**: on a machine with a browser and `claude` logged in, run `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (~1 year validity; an interactive login token won't auto-refresh headlessly).
+5. Fill in the rest of `.env`:
+
+| Var | Required | Default | Notes |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | yes | - | from @BotFather |
+| `OWNER_USER_ID` | yes | - | from @userinfobot |
+| `CLAUDE_CODE_OAUTH_TOKEN` | yes | - | from `claude setup-token` |
+| `AGENT_NAME` | no | `Agent` | display name |
+| `CLAUDE_BIN` | no | `~/.local/bin/claude` | path to the `claude` CLI |
+| `AGENT_TURN_TIMEOUT` | no | `1800` | seconds before a turn is killed |
+| `ALLOWED_GROUP_IDS` | no | (none) | comma-separated group chat ids, see **Groups** |
+| `AGENT_HOME` | no | repo dir | only needed running the bot from elsewhere |
+| `IS_SANDBOX` | no | (unset) | set `1` if the bot runs as root, see **Deploy** |
+
+## Run it
+
+```bash
+uv run python -m agent
+```
+
+Requires the [`claude` CLI](https://docs.claude.com/en/docs/claude-code) logged in (or `CLAUDE_CODE_OAUTH_TOKEN` set) and [uv](https://docs.astral.sh/uv/), Python 3.10+. `uv` creates the venv and installs the one dependency on first run, and `.env` auto-loads from `AGENT_HOME` on startup (a minimal loader, not `python-dotenv`; already-set env vars always win). Without uv: `pip install .` then `python -m agent`.
+
+Tests (pure functions, no network, no bot token): `uv run python -m unittest discover -s tests`.
+
+## What it gives you
+
+- **Bridges Telegram and Claude Code** headlessly: one long-poll process (no webhook, no open port), one rolling `claude -p` session per chat.
+- **Gates access to one owner**: DMs always served; groups are opt-in via allow-list + @-mention.
+- **Streams a live progress bubble**: one Telegram message updates in place with every tool call (`⚡️` Bash, `📖` Read, `📝` Edit/Write, `🔧` MCP).
+- **Persists reminders past the turn**: a builtin `schedule` MCP server + a `JobQueue` tick, since claude's own `CronCreate` dies the moment the turn's process exits.
+- **Deploys as a systemd service**: one idempotent install script, safe to re-run after `git pull`.
 
 ## Project layout
 
@@ -37,242 +82,66 @@ tests/               pure-function characterization tests (no network, no token)
 deploy/              systemd unit + idempotent install script
 ```
 
-## Open a new agent
-
-1. **Fork from the template.**
-   ```
-   gh repo create <your-new-agent-name> --template <owner>/agent-template --private --clone
-   cd <your-new-agent-name>
-   ```
-   (Replace `<owner>/agent-template` with this template's actual `owner/repo` once it's pushed
-   to GitHub.)
-
-2. **Write the persona.** Edit `SOUL.md` — it's the *only* file you're expected to
-   change to make this a different agent. Everything under "You are / Tone / What you
-   do / What you don't do" gets injected as the Claude system prompt on every turn
-   (`claude -p --append-system-prompt "$(cat SOUL.md)"`). The `src/agent/` package stays as-is.
-
-3. **Get a Telegram bot token.** Talk to [@BotFather](https://t.me/BotFather),
-   `/newbot`, copy the token → `TELEGRAM_BOT_TOKEN`. While you're there, also run
-   `/setprivacy` → select the new bot → **Disable**. Skip this and group mentions silently
-   never reach the bot (see **Groups** below for why) — cheaper to do it now than to debug it
-   later.
-
-4. **Get your Telegram user id.** Talk to [@userinfobot](https://t.me/userinfobot) →
-   `OWNER_USER_ID`. This id is the trust anchor — always served, in DM or any group. Everyone
-   else is ignored unless they're in an allow-listed group (see **Groups** below).
-
-5. **Get a Claude Code OAuth token.** On any machine with a browser and the `claude`
-   CLI logged in:
-   ```
-   claude setup-token
-   ```
-   This prints a token (`sk-ant-oat01-…`, ~1 year validity) → `CLAUDE_CODE_OAUTH_TOKEN`.
-   This is what lets `claude -p` authenticate headlessly on a server with no browser —
-   don't use an interactive login token here, it won't auto-refresh.
-
-6. **Fill in `.env`.**
-   ```
-   cp .env.example .env
-   ```
-   then edit it. Required: `TELEGRAM_BOT_TOKEN`, `OWNER_USER_ID`,
-   `CLAUDE_CODE_OAUTH_TOKEN`. Optional (defaults shown): `AGENT_NAME=Agent` (display
-   name), `CLAUDE_BIN=~/.local/bin/claude` (path to the `claude` CLI),
-   `AGENT_TURN_TIMEOUT=1800` (seconds before a turn is killed), `AGENT_HOME` (defaults
-   to this repo's directory — only needed if you run the bot from elsewhere).
-
-## Run it locally
-
-Requires the [`claude` CLI](https://docs.claude.com/en/docs/claude-code) installed and logged
-in (or `CLAUDE_CODE_OAUTH_TOKEN` set, per above), plus [uv](https://docs.astral.sh/uv/):
-
-```
-uv run python -m agent
-```
-
-`uv` creates the virtualenv and installs the dependency on first run (Python 3.10+). The bot
-auto-loads `.env` from `AGENT_HOME` on startup (a minimal loader, not `python-dotenv` —
-already-set env vars always win), so this is the entire local flow. Message your bot on
-Telegram; it replies via a resumed `claude -p` session.
-
-Without uv, a plain venv works too — `pip install .` then `python -m agent`.
-
-## Tests
-
-The fiddly pure functions (markdown→HTML rendering, message chunking, env parsing, the cron
-matcher, the schedules.json read/write layer, the runtime MCP config merge) have
-characterization tests that run with no network and no bot token:
-
-```
-uv run python -m unittest discover -s tests
-```
-
-## Run it on a VM / LXC (systemd, always-on)
-
-For a Linux host with systemd where the bot should survive reboots and crash-restart:
-
-```
-bash deploy/install.sh
-```
-
-This is idempotent — safe to re-run after `git pull` to pick up code changes. It:
-
-- creates `.venv/` and installs the project + dependency (via `uv sync`, or a `pip install`
-  fallback if uv isn't present)
-- checks `.env` exists (fails fast with instructions if not — see step 6 above)
-- warns if the `claude` CLI isn't found at `CLAUDE_BIN` / on `PATH`
-- renders `deploy/agent.service` (a template — placeholders `__REPO_DIR__`,
-  `__RUN_USER__`, `__AGENT_NAME__` are filled in from the script's own location and the
-  invoking user, nothing hardcoded) and installs it to `/etc/systemd/system/`
-- `systemctl daemon-reload`, `enable --now`, and `restart` (so a re-run actually
-  applies new code, not just a no-op `enable` on an already-running unit)
-
-The unit name is derived from the repo directory's basename (e.g. cloning as
-`my-agent/` installs `my-agent.service`), so multiple forked agents can run side by
-side on the same host. Override with `SERVICE_NAME=foo bash deploy/install.sh` if you
-want a different unit name than the directory.
-
-Useful commands afterwards:
-```
-sudo systemctl status <service-name>
-sudo journalctl -u <service-name> -f
-```
-
-If you'd rather hand-install the unit yourself instead of running the script, copy
-`deploy/agent.service`, replace `__REPO_DIR__` / `__RUN_USER__` / `__AGENT_NAME__`
-manually, then `systemctl daemon-reload && systemctl enable --now <name>.service`.
-
-Any Linux host with systemd works (a VM, a container, a cloud box). For other setups —
-macOS launchd, a container platform, a process manager — wrap `.venv/bin/python -m agent`
-however that target expects; the bot itself is just a long-poll process with no open port.
-
-If the bot runs as **root** (e.g. a bare LXC container), `claude` refuses
-`--permission-mode bypassPermissions` for safety — add `IS_SANDBOX=1` to `.env` to allow it
-inside a sandboxed container. Running as a non-root user avoids this entirely (recommended).
-
 ## Commands
 
-- `/start` — greet, confirm the bot is up.
-- `/new` — clear this chat's rolling session (`run/session-<chat_id>`); the next message
-  starts a fresh `claude` conversation with no prior history.
+- `/start`: greet, confirm the bot is up.
+- `/new`: clear this chat's rolling session; the next message starts a fresh `claude` conversation with no prior history.
 
 ## Groups
 
-By default the bot only serves the owner in DM. To let a group use it:
+Off by default (owner-only DM). To let a group in:
 
-0. **Privacy mode must be Disabled first** (skip if you already did this in step 3 of
-   *Open a new agent*). Telegram's default privacy mode ON only delivers commands
-   (`/foo@bot`) and replies to the bot's own messages — a plain `@bot hi` text mention is
-   **silently dropped by Telegram before it ever reaches the bot** (no error, nothing to log,
-   nothing to debug on this side). Fix: [@BotFather](https://t.me/BotFather) → `/setprivacy` →
-   select the bot → **Disable**. If the bot is already in the group, the setting doesn't apply
-   retroactively — remove it and re-add it after disabling.
+0. **Disable privacy mode first** (skip if already done in step 2 of **Fork it**): [@BotFather](https://t.me/BotFather) → `/setprivacy` → select the bot → **Disable**. With privacy ON, a plain `@bot hi` text mention is silently dropped by Telegram before it ever reaches the bot (only commands and replies get through); if the bot is already in the group, remove and re-add it after disabling.
 1. Add the bot to the group.
-2. @-mention it once — it replies with that group's `id`.
-3. Put the id in `.env`'s `ALLOWED_GROUP_IDS` (comma-separated for several) and restart.
+2. @-mention it once, it replies with that group's id.
+3. Put the id in `ALLOWED_GROUP_IDS` (comma-separated for several) and restart.
 
-In a group the bot only responds when @-mentioned or replied to (it stays quiet in normal
-chatter), each chat keeps its own `claude` session, and group messages are tagged with the
-sender's name so `claude` knows who's talking. Note: anyone who can address the bot in an
-allow-listed group can drive `claude` on the host — only add groups whose members you trust.
+In a group the bot only responds when @-mentioned or replied to, each chat keeps its own `claude` session, and messages are tagged with the sender's name so `claude` knows who's talking. Anyone who can address the bot in an allow-listed group can drive `claude` on the host: only add groups you trust.
 
 ## What's built in
 
-- **Media in** — photos / documents / voice / etc. are downloaded to `run/telegram/…` and
-  their local path is passed into the prompt, so `claude` reads the file with its own tools.
-- **Files out** — anything `claude` drops in `run/outbox/` is sent back to the chat at the end
-  of the turn (failed sends are kept and reported, never silently lost).
-- **Live progress** — one Telegram message updates in place with each tool `claude` runs
-  (`📖 Read`, `⚡️ Bash …`, `📝 Edit`), so a long turn visibly shows what it's doing.
-- **Reactions** — a random emoji acks receipt, overwritten with 👍 / 👎 when the turn ends.
-- **Typing indicator** — a real message gets an immediate "typing…" that's kept alive until the
-  turn's first outbound message appears (progress bubble or reply, whichever comes first), then
-  stops for good. Scheduled firings never trigger it — no one's waiting on those.
-- **Reply / quote context** — when a message is a Telegram *reply* to an earlier one, the
-  replied-to message (or, if the user hand-selected part of it, just that quoted fragment) is
-  threaded into the prompt as context. So a user can point at a specific earlier message —
-  "reply to that notification and say: done" — and `claude` knows which one, re-injected every
-  turn regardless of session memory (works in a fresh session, hours later).
-- **Graceful failure handling** — when a `claude -p` turn fails, the bot surfaces the *real*
-  reason from the run's result event (a usage limit, an auth error, an API 5xx) instead of a
-  bare "claude exited 1", and categorizes it: a **usage limit** (429) or a **transient** blip
-  (408 / 5xx / 529 / network) gets a calm notice and stays silent on a scheduled tick (it
-  self-heals, and a monitoring firing shouldn't repeat it every run); an **auth** failure
-  (401 / 403) gets a "token likely needs refreshing" notice and is surfaced *everywhere*,
-  scheduled ticks included, since a dead token won't fix itself; anything else is reported as a
-  genuine failure with claude's own message.
+- **Media in / files out**: photos, documents, voice, etc. download to `run/telegram/…` with the local path passed into the prompt; anything `claude` drops in `run/outbox/` is sent back at the end of the turn (a failed send is kept and reported, never silently lost).
+- **Reply / quote context**: replying to (or Telegram-quoting part of) an earlier message threads that text into the prompt, so `claude` knows what "that" refers to, even hours later in a fresh session.
+- **Reactions + typing indicator**: a random emoji acks receipt, swapped for 👍/👎 on completion; a "typing…" indicator runs until the turn's first outbound message appears.
+- **Graceful failure handling**: a failed turn surfaces the real reason (usage limit, auth error, API 5xx) instead of a bare exit code, classified so a usage-limit or transient blip stays quiet on a scheduled tick (it self-heals) while an auth failure ("token likely needs refreshing") always surfaces.
 
 ## Scheduling
 
-`claude` can set up persistent reminders / recurring tasks — "remind me at 9am", "ping this
-group every Monday" — via a builtin `mcp__schedule__*` MCP tool that's always mounted (see
-**Extra MCP servers** below), regardless of persona. This is deliberate: claude's own built-in
-`CronCreate`/`CronList` only live inside the current `claude -p` process's memory, and this bot
-spawns a brand new `claude -p` per Telegram message — the moment that turn ends, any
-`CronCreate` job it made evaporates and will never fire. Every turn's system prompt tells
-claude this explicitly, so it should never reach for `CronCreate` in the first place.
+`claude` sets up persistent reminders via a builtin `mcp__schedule__*` MCP tool, always mounted regardless of persona. This exists because claude's own `CronCreate`/`CronList` live only in the current `claude -p` process's memory, and this bot spawns a fresh process per message: any `CronCreate` job evaporates the instant that turn ends. Real persistence lives in the bot itself: schedules sit in `run/schedules.json`, and a `JobQueue` tick every 60 seconds fires any schedule whose cron expression matches the current minute.
 
-Real persistence lives in the bot process itself: schedules are stored in `run/schedules.json`
-(create/edit/list/remove all go through the MCP tool), and a `JobQueue` job ticks every 60
-seconds checking which schedules' cron expression matches the current minute. A hit runs a full
-`claude -p` turn — same machinery as an incoming message, no user text involved this time — and
-delivers the reply to the schedule's chat.
+- **Downtime isn't backfilled**: a missed firing while the bot was down is skipped, not caught up (small in-process ticking delays ARE caught up, capped at 5 minutes).
+- **`once: true` schedules self-delete** after firing: use these for one-off reminders instead of a cron matching one specific minute.
+- **A same-minute restart can double-fire** (the "last processed minute" isn't persisted to disk): an accepted tradeoff for a single-owner bot.
+- **No timezone field**: cron expressions evaluate against the bot process's local clock.
+- **`NO_REPLY` sentinel**: for a monitoring-style schedule, tell claude to reply with exactly `NO_REPLY` when there's nothing to report; that tick sends nothing and deletes its own progress bubble. Only honored on a scheduled firing, never in a normal conversation.
+- Ask claude to list/edit/remove schedules in plain language: it drives `mcp__schedule__*` itself, no separate command needed.
 
-Things worth knowing:
+## Deploy (systemd)
 
-- **Downtime isn't backfilled.** The "last processed minute" is in-memory only. If the bot is
-  down when a schedule would have fired, that firing is simply skipped — it does not run
-  late/catch-up on restart. (Small in-process ticking delays, e.g. the event loop being briefly
-  busy, ARE caught up, capped at 5 minutes.)
-- **`once: true` schedules self-delete** after firing — use these for one-off reminders instead
-  of a cron expression that only matches one specific minute.
-- **A same-minute restart can double-fire.** Because "last processed minute" isn't persisted to
-  disk, restarting the bot in the same minute a schedule fired can make it fire again on the
-  first tick after restart. Accepted tradeoff for a single-owner bot — not worth a persisted
-  firing ledger.
-- **No timezone field** — cron expressions are evaluated against the bot process's local clock.
-- Ask claude to list/edit/remove schedules in plain language ("what reminders do I have set
-  up?", "turn off the daily 8am one") — it drives `mcp__schedule__*` itself, no separate command.
-- **Silent monitoring via `NO_REPLY`.** For a monitoring-style schedule that should only speak
-  up when something's actually wrong ("check the error log every 30 minutes"), tell claude in
-  the schedule's prompt to reply with exactly `NO_REPLY` (nothing else in the message) when
-  there's nothing to report. A scheduled firing whose reply is exactly that token sends nothing
-  to the chat and deletes its own progress bubble, so a "nothing happened" tick leaves no trace.
-  Any files claude drops in the outbox during that turn are still sent — only the text reply is
-  suppressed. This sentinel only works on a scheduled firing: a normal conversation with the
-  user always gets a real reply, even if claude were to send `NO_REPLY` there by mistake.
+```bash
+bash deploy/install.sh
+```
+
+Idempotent, safe to re-run after `git pull`. It creates `.venv/` (`uv sync`, or a `pip install` fallback), fails fast if `.env` is missing, warns if the `claude` CLI isn't found, renders `deploy/agent.service` (placeholders filled from the script's own location and the invoking user) into `/etc/systemd/system/`, then `daemon-reload` + `enable --now` + `restart` (so a re-run actually applies new code, not a no-op on an already-running unit). The unit name comes from the repo directory's basename, so forked agents run side by side on one host; override with `SERVICE_NAME=foo bash deploy/install.sh`.
+
+- A restart doesn't kill an in-flight turn: `KillMode=mixed` lets the running handler finish before systemd sends SIGKILL, capped by `TimeoutStopSec=300`.
+- If the bot runs as **root** (e.g. a bare LXC container), `claude` refuses `--permission-mode bypassPermissions` unless `IS_SANDBOX=1` is set in `.env`. A non-root user avoids this entirely (recommended).
+- Any Linux host with systemd works (VM, container, cloud box). Elsewhere (macOS launchd, a container platform), wrap `.venv/bin/python -m agent` directly: the bot itself is just a long-poll process with no open port.
+
+Afterwards: `sudo systemctl status <name>` · `sudo journalctl -u <name> -f`.
 
 ## Skills
 
-Forked agents tend to grow recurring workflows (a daily standup, a weekly report) that are
-better expressed as Claude Code skills than as ever-longer schedule prompts. The pattern
-that works here:
+Recurring workflows (a daily standup, a weekly report) are better expressed as Claude Code skills than as ever-longer schedule prompts:
 
-- Keep skills in their own repo — public is convenient, the host can clone it without any
-  auth — cloned somewhere on the host (e.g. `~/skills`), and **symlink each skill** into
-  `~/.claude/skills/<name>`. Headless `claude -p` picks up symlinked skills fine.
-- **Link every skill a schedule references.** A schedule whose prompt says "run the
-  weekly-report skill" still fires with the symlink missing — claude just can't see the
-  skill and improvises or comes up empty, with nothing in the journal pointing at the real
-  cause. After adding one, verify visibility:
-  `claude -p 'List your available skills, names only.'`
-- There's no auto-pull — updating the skills repo means `git pull` on the host (or have
-  the schedule prompt do the pull as its first step).
-- If a skill shells out to `gh api` for read endpoints, put filters in the URL query
-  string (`gh api "repos/<o>/<r>/commits?since=$ISO"`). Passing them with `-f` silently
-  turns the request into a POST, and GET-only endpoints answer it with a 404.
+- Keep skills in their own repo, cloned somewhere on the host, and **symlink each one** into `~/.claude/skills/<name>` (headless `claude -p` picks up symlinks fine).
+- **Link every skill a schedule references**, or claude silently improvises with no clue why. Verify with `claude -p 'List your available skills, names only.'`.
+- No auto-pull: updating means `git pull` on the host (or have the schedule prompt do it as its first step).
+- A skill shelling out to `gh api` for reads should put filters in the URL query string, not `-f` (which silently turns a GET into a POST, and GET-only endpoints answer with a 404).
 
 ## Extra MCP servers
 
-The builtin `schedule` server (above) is always present and can't be overridden — a
-`mcp-config.json` entry named `schedule` is ignored in favor of it (a warning is logged).
-Drop an `mcp-config.json` (gitignored, same class as `.env`) in the repo root and every turn
-mounts its servers alongside the builtin one via `--mcp-config --strict-mcp-config` (now always
-passed, since scheduling needs it too) — no code change needed. `--strict-mcp-config` means the
-builtin `schedule` server plus this file are the *only* source of MCP servers for the bot; a
-`claude mcp add --scope user` done interactively on the same box is invisible to it, same as
-it's invisible to any other headless `claude -p` invocation. No file = just the builtin
-`schedule` server, same as before this existed.
+Drop an `mcp-config.json` (gitignored, same class as `.env`) in the repo root and every turn mounts its servers alongside the builtin `schedule` one:
 
 ```json
 {
@@ -286,18 +155,14 @@ it's invisible to any other headless `claude -p` invocation. No file = just the 
 }
 ```
 
-No `--allowedTools` entry needed — `--permission-mode bypassPermissions` (already used for
-every turn) trusts MCP tools the same way it trusts `Bash`/`Read`/`Write`.
+A `schedule` entry here is ignored in favor of the builtin (a warning is logged). `--strict-mcp-config` means these are the *only* MCP servers the bot sees: a `claude mcp add --scope user` done interactively on the box is invisible to it, same as to any other headless `claude -p`. No `--allowedTools` needed: `--permission-mode bypassPermissions` already trusts MCP tools the same way it trusts `Bash`/`Read`/`Write`.
 
-To verify a server by hand on the host (is the token right? does the tool actually
-answer?), run a turn the same way the bot does — load `.env` and pass the same flags:
+To verify a server by hand: `set -a && . ./.env && set +a`, then `claude -p 'Use the <server> <tool> tool and report the result.' --mcp-config mcp-config.json --strict-mcp-config --permission-mode bypassPermissions`. Don't drop `bypassPermissions` here: without it every MCP call stops at a permission prompt headless mode auto-denies, which looks exactly like a broken server or a bad token when it's neither.
 
-```
-set -a && . ./.env && set +a
-claude -p 'Use the <server> <tool> tool and report the result.' \
-  --mcp-config mcp-config.json --strict-mcp-config --permission-mode bypassPermissions
-```
+## Contributing
 
-Don't drop `--permission-mode bypassPermissions` here: without it every MCP call stops at
-a permission prompt that headless mode auto-denies, which looks exactly like a broken
-server or a bad token when it's neither.
+A template repo, but issues and PRs are welcome: ground rules in [CONTRIBUTING.md](https://github.com/zyx1121/.github/blob/main/CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE) · fork it, rename the bot, make it yours.
