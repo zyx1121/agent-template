@@ -1,0 +1,6 @@
+# Makes this folder visible to the kitbash surface, so fs_write can put the
+# fork here file by file. A folder without a name and a description is one
+# no agent can list or write into (kitbash PLAN.md 2.1).
+name: deploy
+description: >-
+  Deploy targets: a systemd unit and install script, and the kitbash container entrypoint.

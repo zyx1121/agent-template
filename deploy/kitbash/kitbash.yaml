@@ -1,0 +1,6 @@
+# Makes this folder visible to the kitbash surface, so fs_write can put the
+# fork here file by file. A folder without a name and a description is one
+# no agent can list or write into (kitbash PLAN.md 2.1).
+name: kitbash-entrypoint
+description: >-
+  PID 1 of the kitbash container: checks the environment by name, writes mcp-config.json, execs the bot.
