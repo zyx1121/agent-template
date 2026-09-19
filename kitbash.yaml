@@ -1,0 +1,61 @@
+# The kitbash Package this repo is. It sits at the repo root, not in deploy/kitbash/,
+# because a build unit has to point inside its own Package folder (PLAN.md 2.5 rule 4) and
+# the context needs src/, SOUL.md and pyproject.toml. Everything else about the target is
+# in deploy/kitbash/; the Dockerfile is the repo root one this manifest builds.
+name: agent
+description: >-
+  A single owner Telegram bot that answers as a Claude Code session, with this member's
+  kitbash surface as its tools. Message it and the work happens here. Fork it, rewrite
+  SOUL.md, and it is a different agent.
+tags: [telegram, claude-code, agent, bot]
+
+provides:
+  # No tools: this Process publishes nothing (expose: none), it reaches out.
+  #
+  # What the agent may call back over /mcp, which is what claude gets as tools on top of
+  # Bash, Read, Write and the builtin schedule server. This is the owner's whole working
+  # surface, because the owner is the only person the bot serves and everything the bot
+  # does is something they asked for in a chat. It is also more than a shared agent should
+  # ever hold: proc_run and pkg_* mean a turn can build and start Processes as the owner,
+  # and fs_* over /home/* means it reads and writes their home. A fork that serves a group
+  # (ALLOWED_GROUP_IDS, see the README) narrows this to what that group may drive: drop
+  # pkg_*, proc_run and proc_stop first, then cut paths down to the folders it works in.
+  permits:
+    tools: [fs_*, pkg_*, proc_list, proc_logs, proc_run, proc_stop, tel_query, packages]
+    paths: [/org, /home/*]
+
+deploy:
+  units:
+    - type: container
+      build: .
+      # A long-poll bot: it opens a connection to Telegram and nothing opens one to it.
+      expose: none
+      # Names only. The member writes the values with secrets_set and kitbashd resolves
+      # them into the container at every start, so neither token is in this file, in the
+      # image, or on a command line. Rotating one is secrets_set plus a restart.
+      secrets: [TELEGRAM_BOT_TOKEN, CLAUDE_CODE_OAUTH_TOKEN]
+      # The knobs a fork edits here, none of them a credential. OWNER_USER_ID is the trust
+      # anchor: the Telegram user id @userinfobot gives you, and the one CHANGE_ME that is
+      # not optional. IS_SANDBOX is set because a container start maps container root to
+      # the member and claude refuses bypassPermissions as root without it.
+      env:
+        OWNER_USER_ID: "CHANGE_ME"
+        AGENT_NAME: "Agent"
+        AGENT_HOME: "/app"
+        IS_SANDBOX: "1"
+        CLAUDE_BIN: "/usr/local/bin/claude"
+      # Everything that must outlive a restart: run/schedules.json, the per-chat claude
+      # session ids, inbound attachments, the outbox, and HOME underneath it, which is
+      # where claude keeps the session rollouts --resume reads. The image holds the code
+      # and SOUL.md, so nothing the fork edits is shadowed by what is on the mount.
+      #
+      # The member makes this folder visible before it can be mounted: fs_write a
+      # kitbash.yaml into it with a name and a description, which is the rule the fs family
+      # reads by (PLAN.md 2.3). Replace CHANGE_ME with your member name.
+      mounts:
+        - source: /home/CHANGE_ME/agent-data
+          target: /app/run
+          mode: rw
+      # One python process plus one `claude -p` child per in-flight turn, and a turn is one
+      # chat at a time for one owner. 1Gi covers a turn whose child is reading large files.
+      limits: { memory: 1Gi }
