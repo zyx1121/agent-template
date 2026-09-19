@@ -70,6 +70,7 @@ pyproject.toml       project metadata + dependencies (python-telegram-bot, mcp)
 SOUL.md              the persona — the ONLY file you change to make a different agent
 .env                 secrets + config (copied from .env.example, gitignored)
 kitbash.yaml         kitbash Package manifest (the second deploy target, see Deploy (kitbash))
+src/kitbash.yaml     folder manifests (also in src/agent, deploy, deploy/kitbash) so fs_write can place a fork on kitbash
 Dockerfile           the image that manifest builds: node + claude CLI + python + this project
 src/agent/
   config.py          Settings dataclass + env parsing, in one place
@@ -140,7 +141,7 @@ From an MCP session on the kitbash host, as the member who will own the Process:
 
 1. **Set the two secrets**: `secrets_set TELEGRAM_BOT_TOKEN`, `secrets_set CLAUDE_CODE_OAUTH_TOKEN`. Values live with kitbashd and are resolved into the container at every start, so neither one is ever in the manifest, the image, or a command line. Rotating one is `secrets_set` plus a restart.
 2. **Make the data folder visible**: `fs_write /home/<you>/agent-data/kitbash.yaml` with a `name` and a `description`. A folder kitbash cannot list is a folder it will not mount, and this is the folder the Process writes its state into.
-3. **Get the fork into your home**, `/home/<you>/<your-agent-name>/`: `fs_write` the files, or `git push`/clone it there if the host has git and a route to your remote.
+3. **Get the fork into your home**, `/home/<you>/<your-agent-name>/`: `fs_write` each file. Two rules of the surface shape this step. A folder is writable only once it carries a `kitbash.yaml` with a `name` and a `description`, so write the folder's `kitbash.yaml` first; this repo ships one in `src/`, `src/agent/`, `deploy/` and `deploy/kitbash/` for exactly that. And a path component beginning with `.` is refused, so `.dockerignore`, `.gitignore` and `.env.example` stay behind; the build does not need them, every `COPY` in the `Dockerfile` names its files. What the image needs is `kitbash.yaml`, `Dockerfile`, `pyproject.toml`, `uv.lock`, `SOUL.md`, `deploy/kitbash/entrypoint.sh` and `src/agent/*.py`, plus the folder manifests. `git push` is not a path: members reach the host through the MCP surface only.
 4. **Edit the two `CHANGE_ME` values in `kitbash.yaml`**: `OWNER_USER_ID` (your Telegram user id, from [@userinfobot](https://t.me/userinfobot)) and the mount `source` (`/home/<you>/agent-data`).
 5. **Build and run**: `pkg_build` that folder, then `proc_run` it, then `proc_logs` to watch. The first line is either `kitbash MCP server registered at …` or the list of variables still unset; a missing token stops the start by name instead of crash-looping on a traceback.
 
