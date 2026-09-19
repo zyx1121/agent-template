@@ -69,6 +69,8 @@ Tests (pure functions, no network, no bot token): `uv run python -m unittest dis
 pyproject.toml       project metadata + dependencies (python-telegram-bot, mcp)
 SOUL.md              the persona — the ONLY file you change to make a different agent
 .env                 secrets + config (copied from .env.example, gitignored)
+kitbash.yaml         kitbash Package manifest (the second deploy target, see Deploy (kitbash))
+Dockerfile           the image that manifest builds: node + claude CLI + python + this project
 src/agent/
   config.py          Settings dataclass + env parsing, in one place
   messaging.py       outbound Telegram sender + markdown→HTML rendering (sync, urllib)
@@ -79,7 +81,7 @@ src/agent/
   mcp_schedule.py    stdio MCP server exposing schedule CRUD to claude
   __main__.py        `python -m agent`
 tests/               pure-function characterization tests (no network, no token)
-deploy/              systemd unit + idempotent install script
+deploy/              systemd unit + idempotent install script, and the kitbash entrypoint
 ```
 
 ## Commands
@@ -129,6 +131,31 @@ Idempotent, safe to re-run after `git pull`. It creates `.venv/` (`uv sync`, or 
 - Any Linux host with systemd works (VM, container, cloud box). Elsewhere (macOS launchd, a container platform), wrap `.venv/bin/python -m agent` directly: the bot itself is just a long-poll process with no open port.
 
 Afterwards: `sudo systemctl status <name>` · `sudo journalctl -u <name> -f`.
+
+## Deploy (kitbash)
+
+The same bot as a [kitbash](https://github.com/zyx1121/kitbash) Package: one container, `expose: none`, one folder of Files holding everything that has to survive a restart. `kitbash.yaml` at the repo root is the manifest (the root, because a build unit has to point inside its own Package folder and the context needs `src/`, `SOUL.md` and `pyproject.toml`), the `Dockerfile` beside it is the image (Node 22 + a pinned `claude` CLI + Python 3.12 + this project), and `deploy/kitbash/entrypoint.sh` is PID 1 inside it.
+
+From an MCP session on the kitbash host, as the member who will own the Process:
+
+1. **Set the two secrets**: `secrets_set TELEGRAM_BOT_TOKEN`, `secrets_set CLAUDE_CODE_OAUTH_TOKEN`. Values live with kitbashd and are resolved into the container at every start, so neither one is ever in the manifest, the image, or a command line. Rotating one is `secrets_set` plus a restart.
+2. **Make the data folder visible**: `fs_write /home/<you>/agent-data/kitbash.yaml` with a `name` and a `description`. A folder kitbash cannot list is a folder it will not mount, and this is the folder the Process writes its state into.
+3. **Get the fork into your home**, `/home/<you>/<your-agent-name>/`: `fs_write` the files, or `git push`/clone it there if the host has git and a route to your remote.
+4. **Edit the two `CHANGE_ME` values in `kitbash.yaml`**: `OWNER_USER_ID` (your Telegram user id, from [@userinfobot](https://t.me/userinfobot)) and the mount `source` (`/home/<you>/agent-data`).
+5. **Build and run**: `pkg_build` that folder, then `proc_run` it, then `proc_logs` to watch. The first line is either `kitbash MCP server registered at …` or the list of variables still unset; a missing token stops the start by name instead of crash-looping on a traceback.
+
+What lives where:
+
+- **On the mount** (`/app/run`, the folder from step 2): `schedules.json`, one rolling session id per chat, downloaded attachments, the outbox, and `run/home/.claude`, which is where claude itself keeps the session rollouts `--resume` reads. A restart keeps every reminder and every conversation, and you can read all of it with `fs_read`.
+- **In the image**: the code and `SOUL.md`. The persona travels with the build and nothing on the mount shadows it, so changing it is an edit, a `pkg_build` and a `proc_run`.
+- **Nowhere**: `.env`. kitbash hands the container its environment at every start and the repo's loader skips a file that isn't there, so the table in **Fork it** still describes the config, it just arrives as `env` and `secrets` in the manifest instead.
+- **Not on the mount, on purpose**: the Process token. `mcp-config.json` is written into the image layer (`/app`), 0600, rewritten at every start because the token is new at every start, and each turn's merged `--mcp-config` file is a 0600 temp file that's unlinked when the turn ends. Neither one is in `run/`, so nothing that outlives the container carries a bearer.
+
+A start that can't work until you change something (a secret that isn't set, `OWNER_USER_ID` still `CHANGE_ME`, a bot token Telegram rejects) exits 0 with the reason on stderr, and `restart: on-failure` leaves it stopped so `proc_logs` holds one explanation instead of the same line every few seconds. The rejected-token case is caught rather than raised: python-telegram-bot puts the whole token in that exception's message, so the log names `TELEGRAM_BOT_TOKEN` and never its value. Fix the value, `proc_run` again.
+
+The agent gets the kitbash surface as an MCP server named `kitbash`: every Process is handed `KITBASH_MCP_ENDPOINT` and `KITBASH_TELEMETRY_TOKEN`, and the entrypoint writes them into `mcp-config.json` (see **Extra MCP servers**) before the bot starts, created 0600 by the open itself and rewritten each start because the token is per-Process. Not `claude mcp add`: turns run with `--strict-mcp-config`, so a server registered in `~/.claude.json` would be invisible to them. That file is generated on this target, so a fork wanting other servers here adds them in `deploy/kitbash/entrypoint.sh` rather than committing an `mcp-config.json`. What the agent can then call is exactly `provides.permits` in the manifest: `fs_*`, `pkg_*`, `proc_list`, `proc_logs`, `proc_run`, `proc_stop`, `tel_query`, `packages`, over `/org` and `/home/*`. That is the owner's whole surface, which fits a bot only the owner can talk to; a fork that lets a group in (**Groups**) should narrow it in the same edit that adds the group.
+
+Still one file to reskin the agent (`SOUL.md`), plus the two `CHANGE_ME` values above.
 
 ## Skills
 

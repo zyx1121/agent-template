@@ -20,10 +20,13 @@ import asyncio
 import html
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from telegram.constants import ParseMode
@@ -157,6 +160,39 @@ def _build_mcp_config(settings: Settings, chat_id: int) -> dict:
     return {"mcpServers": servers}
 
 
+def write_mcp_runtime(settings: Settings, chat_id: int) -> Path:
+    """Write this turn's `--mcp-config` file and return its path.
+
+    Deliberately not in `run_dir`: that directory is state a deploy is expected to keep (the
+    kitbash target bind-mounts it out of the member's Files), and this file holds every
+    header of every server in mcp-config.json, which on that target includes the bearer
+    kitbashd issues to this Process. So it is a private temp file, created 0600 by mkstemp
+    (never 0644, not even for an instant, the way a plain write_text leaves it), and
+    `run_turn` unlinks it in a finally when the turn is over."""
+    fd, path = tempfile.mkstemp(prefix=f"mcp-runtime-{chat_id}-", suffix=".json")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(_build_mcp_config(settings, chat_id), fh, ensure_ascii=False)
+    return Path(path)
+
+
+def purge_stale_mcp_runtime(settings: Settings) -> list[Path]:
+    """Remove the per-turn MCP runtime configs an older version of this bot left in `run_dir`,
+    and return what went. Those files are world-readable and hold the same headers as the one
+    above, so an upgrade has to clear them rather than leave them sitting in a folder the
+    deploy keeps. Called once at startup (handlers.main)."""
+    removed: list[Path] = []
+    if not settings.run_dir.exists():
+        return removed
+    for path in sorted(settings.run_dir.glob("mcp-runtime-*.json")):
+        try:
+            path.unlink()
+        except OSError as e:
+            log.warning("could not remove stale MCP runtime config %s: %s", path.name, e)
+            continue
+        removed.append(path)
+    return removed
+
+
 def _tool_line(name: str, inp) -> str:
     """One step-log line for a tool_use block (mirrors noir's claude-stream-progress.py)."""
     inp = inp if isinstance(inp, dict) else {}
@@ -266,90 +302,95 @@ async def run_turn(prompt: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE
     bubble = ProgressBubble(context, chat_id, on_first_send=on_first_send)
 
     # Written once per turn (not per retry attempt below — same chat_id, same config either
-    # way), so both the fresh-session retry and the first attempt point at the same file.
+    # way), so both the fresh-session retry and the first attempt point at the same file, and
+    # removed in the finally below: it carries the MCP servers' headers, so it outlives the
+    # turn nowhere.
     settings.run_dir.mkdir(exist_ok=True)
-    mcp_config_path = settings.run_dir / f"mcp-runtime-{chat_id}.json"
-    mcp_config_path.write_text(json.dumps(_build_mcp_config(settings, chat_id), ensure_ascii=False))
+    mcp_config_path = write_mcp_runtime(settings, chat_id)
 
-    async def _invoke(sid: str):
-        cmd = [settings.claude_bin, "-p", prompt,
-               "--output-format", "stream-json", "--include-partial-messages", "--verbose",
-               "--permission-mode", "bypassPermissions",
-               "--append-system-prompt", system_prompt,
-               # --strict-mcp-config: this is a non-interactive/headless invocation, so
-               # ~/.claude.json's user-scope mcpServers (if any exist on this box) must NOT
-               # silently leak in — the only servers available are the ones listed in the
-               # runtime config this turn just wrote (builtin `schedule` + mcp-config.json, if
-               # any). No --allowedTools needed: --permission-mode bypassPermissions already
-               # trusts every tool, MCP or built-in, the same way it already does for
-               # Bash/Read/Write.
-               "--mcp-config", str(mcp_config_path), "--strict-mcp-config"]
-        if sid:
-            cmd += ["--resume", sid]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(settings.home),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            # stream-json emits one JSON object per line; a big result / tool_use event easily
-            # exceeds asyncio's default 64 KiB StreamReader line limit ("chunk is longer than
-            # limit"). Raise it well past any realistic single event.
-            limit=16 * 1024 * 1024)
-        result_event = None
-        try:
-            async for raw in proc.stdout:
-                line = raw.decode("utf-8", "replace").strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except Exception:
-                    continue
-                if ev.get("type") == "assistant":
-                    for block in (ev.get("message", {}).get("content") or []):
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            name = block.get("name", "")
-                            # StructuredOutput is the --json-schema turn-output mechanism, not
-                            # a work step.
-                            if name == "StructuredOutput":
-                                continue
-                            await bubble.add(_tool_line(name, block.get("input")))
-                elif ev.get("type") == "result":
-                    result_event = ev
-            stderr = (await proc.stderr.read()).decode("utf-8", "replace")
-            returncode = await proc.wait()
-        except asyncio.CancelledError:
-            proc.kill()
-            await proc.wait()
-            raise
-        return returncode, result_event, stderr
+    try:
+        async def _invoke(sid: str):
+            cmd = [settings.claude_bin, "-p", prompt,
+                   "--output-format", "stream-json", "--include-partial-messages", "--verbose",
+                   "--permission-mode", "bypassPermissions",
+                   "--append-system-prompt", system_prompt,
+                   # --strict-mcp-config: this is a non-interactive/headless invocation, so
+                   # ~/.claude.json's user-scope mcpServers (if any exist on this box) must NOT
+                   # silently leak in — the only servers available are the ones listed in the
+                   # runtime config this turn just wrote (builtin `schedule` + mcp-config.json, if
+                   # any). No --allowedTools needed: --permission-mode bypassPermissions already
+                   # trusts every tool, MCP or built-in, the same way it already does for
+                   # Bash/Read/Write.
+                   "--mcp-config", str(mcp_config_path), "--strict-mcp-config"]
+            if sid:
+                cmd += ["--resume", sid]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(settings.home),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                # stream-json emits one JSON object per line; a big result / tool_use event easily
+                # exceeds asyncio's default 64 KiB StreamReader line limit ("chunk is longer than
+                # limit"). Raise it well past any realistic single event.
+                limit=16 * 1024 * 1024)
+            result_event = None
+            try:
+                async for raw in proc.stdout:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("type") == "assistant":
+                        for block in (ev.get("message", {}).get("content") or []):
+                            if isinstance(block, dict) and block.get("type") == "tool_use":
+                                name = block.get("name", "")
+                                # StructuredOutput is the --json-schema turn-output mechanism, not
+                                # a work step.
+                                if name == "StructuredOutput":
+                                    continue
+                                await bubble.add(_tool_line(name, block.get("input")))
+                    elif ev.get("type") == "result":
+                        result_event = ev
+                stderr = (await proc.stderr.read()).decode("utf-8", "replace")
+                returncode = await proc.wait()
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                raise
+            return returncode, result_event, stderr
 
-    async def _invoke_timed(sid: str):
-        try:
-            return await asyncio.wait_for(_invoke(sid), timeout=settings.turn_timeout)
-        except asyncio.TimeoutError:
-            raise subprocess.TimeoutExpired(settings.claude_bin, settings.turn_timeout)
+        async def _invoke_timed(sid: str):
+            try:
+                return await asyncio.wait_for(_invoke(sid), timeout=settings.turn_timeout)
+            except asyncio.TimeoutError:
+                raise subprocess.TimeoutExpired(settings.claude_bin, settings.turn_timeout)
 
-    def _is_stale(sderr: str, ev: dict | None) -> bool:
-        # the "session expired, start fresh" signal used to land only in stderr; check the
-        # result event's text too, since a failure's message now lives there just as often.
-        hay = f"{sderr or ''} {(ev or {}).get('result') or ''}"
-        return bool(re.search(r"no (conversation|rollout) found", hay, re.I))
+        def _is_stale(sderr: str, ev: dict | None) -> bool:
+            # the "session expired, start fresh" signal used to land only in stderr; check the
+            # result event's text too, since a failure's message now lives there just as often.
+            hay = f"{sderr or ''} {(ev or {}).get('result') or ''}"
+            return bool(re.search(r"no (conversation|rollout) found", hay, re.I))
 
-    sid = sf.read_text().strip() if sf.exists() else ""
-    returncode, result_event, stderr = await _invoke_timed(sid)
-    if returncode != 0 and sid and _is_stale(stderr, result_event):
-        sf.unlink(missing_ok=True)  # stale session — start fresh
-        returncode, result_event, stderr = await _invoke_timed("")
-    await bubble.finish()
-    # A turn failed if claude exited non-zero OR the result event itself is flagged is_error
-    # (a 429 usage/session limit reports subtype="success" but is_error=true — don't trust
-    # returncode or subtype alone). Surface the result event's own message, not a bare exit code.
-    if returncode != 0 or (result_event is not None and result_event.get("is_error")):
-        message = _result_message(result_event, stderr, returncode)
-        raise ClaudeTurnError(message, category=_classify_error(result_event, message))
-    if result_event is None:
-        raise RuntimeError("claude stream ended without a result event")
-    new_sid = result_event.get("session_id", "")
-    if new_sid:
-        sf.write_text(new_sid)
-    reply = result_event.get("result") or "(claude returned an empty message)"
-    return reply, bubble.message_id
+        sid = sf.read_text().strip() if sf.exists() else ""
+        returncode, result_event, stderr = await _invoke_timed(sid)
+        if returncode != 0 and sid and _is_stale(stderr, result_event):
+            sf.unlink(missing_ok=True)  # stale session — start fresh
+            returncode, result_event, stderr = await _invoke_timed("")
+        await bubble.finish()
+        # A turn failed if claude exited non-zero OR the result event itself is flagged is_error
+        # (a 429 usage/session limit reports subtype="success" but is_error=true — don't trust
+        # returncode or subtype alone). Surface the result event's own message, not a bare exit code.
+        if returncode != 0 or (result_event is not None and result_event.get("is_error")):
+            message = _result_message(result_event, stderr, returncode)
+            raise ClaudeTurnError(message, category=_classify_error(result_event, message))
+        if result_event is None:
+            raise RuntimeError("claude stream ended without a result event")
+        new_sid = result_event.get("session_id", "")
+        if new_sid:
+            sf.write_text(new_sid)
+        reply = result_event.get("result") or "(claude returned an empty message)"
+        return reply, bubble.message_id
+
+    finally:
+        mcp_config_path.unlink(missing_ok=True)

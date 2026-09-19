@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import shutil
@@ -49,6 +50,7 @@ from agent.claude import (
     NO_REPLY_SENTINEL,
     ClaudeTurnError,
     is_no_reply,
+    purge_stale_mcp_runtime,
     run_turn,
 )
 from agent.config import Settings, load_settings, safe_name
@@ -61,6 +63,43 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", le
 # the token never lands in the journal.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("agent")
+
+REDACTED = "<redacted>"
+
+
+class RedactingFormatter(logging.Formatter):
+    """A formatter that removes known secret values from the line it just rendered, tracebacks
+    included, because redacting only our own log calls is not enough: python-telegram-bot logs
+    the InvalidToken it is about to raise, and that exception's message is literally "The token
+    `<value>` was rejected by the server.". Rendering is the one place every logger and every
+    traceback passes through, so it is the place to do this.
+
+    It is a last line of defence, not a licence to log a secret on purpose."""
+
+    def __init__(self, formatter: logging.Formatter, secrets: list[str]):
+        super().__init__()
+        self._inner = formatter
+        # Short values would redact half the log; a bot token or an OAuth token is long.
+        self._secrets = sorted({s for s in secrets if s and len(s) >= 8}, key=len, reverse=True)
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = self._inner.format(record)
+        for secret in self._secrets:
+            rendered = rendered.replace(secret, REDACTED)
+        return rendered
+
+
+def redact_from_logs(*secrets: str) -> None:
+    """Wrap every root handler's formatter so no handler can print these values. Called once
+    from main() with the bot token and the Claude Code OAuth token, the two credentials that
+    reach this process and are known to travel inside exception messages."""
+    keep = [s for s in secrets if s and len(s) >= 8]
+    if not keep:
+        return
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler.formatter, RedactingFormatter):
+            continue
+        handler.setFormatter(RedactingFormatter(handler.formatter or logging.Formatter(), keep))
 
 TG_DOWNLOAD_LIMIT = 20 * 1024 * 1024  # Telegram Bot API getFile download cap
 
@@ -587,8 +626,37 @@ async def post_init(app: Application) -> None:
         log.warning("post_init presentation failed (non-fatal): %s", e)
 
 
+def run_forever(app: Application) -> None:
+    """Long-poll until stopped, catching the one startup failure that must never be logged the
+    way it arrives: python-telegram-bot puts the whole bot token into InvalidToken's message
+    ("The token `<value>` was rejected by the server."), so an uncaught one prints the
+    credential into the process log, where a container platform that restarts on failure
+    reprints it forever and anything that can read those logs can read the token. Name the
+    variable, never the value.
+
+    Exits 0, not 1: nothing about this start can work until a human changes that value, and a
+    zero exit is what stops a restart policy of `on-failure` from looping on the same line (see
+    the kitbash deploy target). systemd's `Restart=always` retries either way."""
+    from telegram.error import InvalidToken
+    try:
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except InvalidToken:
+        log.error("TELEGRAM_BOT_TOKEN was rejected by Telegram. The value is not logged here, "
+                  "on purpose. Check it against @BotFather and start the bot again.")
+        raise SystemExit(0) from None
+
+
 def main() -> None:
     settings = load_settings()
+    # Before anything can log: both of these arrive as environment values and both turn up
+    # inside exception messages other libraries log for us.
+    redact_from_logs(settings.token, os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", ""))
+    # An older version of this bot kept each turn's MCP runtime config in run/, world
+    # readable and never deleted; run/ is exactly what a deploy persists, so clear them here
+    # instead of leaving credentials behind on an upgrade.
+    stale = purge_stale_mcp_runtime(settings)
+    if stale:
+        log.info("removed %d MCP runtime config(s) left in run/ by an older version", len(stale))
     app = Application.builder().token(settings.token).post_init(post_init).build()
     app.bot_data["settings"] = settings
     # served = owner (DM or any group) OR any member of an allow-listed group. Everything else
@@ -607,7 +675,7 @@ def main() -> None:
     log.info("%s bot starting (long-poll); owner=%s, allowed groups=%s",
              settings.agent_name, settings.owner_id, sorted(settings.allowed_groups) or "(none)")
     # Keep pending updates: messages sent while the bot was down must survive a restart.
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    run_forever(app)
 
 
 if __name__ == "__main__":
