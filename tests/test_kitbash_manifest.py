@@ -73,6 +73,12 @@ class ManifestContent(unittest.TestCase):
         ).run_dir
         self.assertEqual(target.group(1), str(run_dir))
 
+    def test_restart_is_on_failure(self):
+        # The config failures exit 0 on purpose (see deploy/kitbash/entrypoint.sh and
+        # handlers.run_forever), which under this policy is a Process that stops and says
+        # why instead of looping on the same line.
+        self.assertRegex(self.text, r"(?m)^\s*restart:\s*on-failure\s*$")
+
     def test_the_mount_is_writable(self):
         self.assertRegex(self.text, r"(?m)^\s*mode:\s*rw\s*$")
 
@@ -113,6 +119,7 @@ class ManifestStructure(unittest.TestCase):
                          sorted(["TELEGRAM_BOT_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"]))
         self.assertEqual(unit["mounts"][0]["target"], unit["env"]["AGENT_HOME"] + "/run")
         self.assertEqual(unit["limits"]["memory"], "1Gi")
+        self.assertEqual(unit["restart"], "on-failure")
 
 
 class Entrypoint(unittest.TestCase):
@@ -128,6 +135,11 @@ class Entrypoint(unittest.TestCase):
         # ~/.claude.json is invisible to it. mcp-config.json is the seam that works.
         self.assertIn("mcp-config.json", self.text)
         self.assertIn("KITBASH_MCP_ENDPOINT", self.text)
+
+    def test_it_creates_the_mcp_config_0600_at_the_open(self):
+        # Not write_text followed by chmod: that leaves the bearer in a 0644 file for as
+        # long as the two calls take.
+        self.assertIn("os.O_CREAT | os.O_TRUNC, 0o600", self.text)
 
     def test_it_never_prints_a_token_value(self):
         # Naming a secret in a message is fine and useful; expanding one into a line that

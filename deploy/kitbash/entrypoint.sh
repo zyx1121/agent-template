@@ -5,9 +5,13 @@
 # kitbashd handed this Process a one-session MCP endpoint and token.
 set -eu
 
+# A start that cannot work until a person changes a value stops with status 0, so the
+# on-failure restart policy in kitbash.yaml leaves the Process stopped with the reason in
+# proc_logs instead of reprinting the same line every few seconds forever. A crash that a
+# restart might actually fix still exits non zero and still comes back.
 fail() {
   echo "$*" >&2
-  exit 1
+  exit 0
 }
 
 # Fail fast and by name. A missing token would otherwise surface as a KeyError traceback
@@ -23,7 +27,7 @@ if [ -n "$missing" ]; then
   echo "agent: TELEGRAM_BOT_TOKEN and CLAUDE_CODE_OAUTH_TOKEN are secrets, set them with" >&2
   echo "agent:   secrets_set, then proc_run again. OWNER_USER_ID is deploy.units[0].env in" >&2
   echo "agent:   kitbash.yaml: replace CHANGE_ME with your Telegram user id and pkg_build." >&2
-  exit 1
+  exit 0
 fi
 
 case "$OWNER_USER_ID" in
@@ -40,35 +44,30 @@ mkdir -p "${AGENT_HOME:-/app}/run" "${HOME:-/app/run/home}"
 # claude.py): a server in ~/.claude.json is invisible to a headless `claude -p`, and
 # mcp-config.json is the seam this repo already has for extra servers (README, "Extra MCP
 # servers"). The token is read from the environment by the writer below and never echoed,
-# never on a command line, never in a log line; the file is written 0600 and rewritten at
-# every start, because kitbashd issues a fresh token per Process.
+# never on a command line, never in a log line. The file is created 0600 by the open itself
+# rather than chmodded after the fact, it lives in the image layer and not on the mount, and
+# it is rewritten from scratch at every start because kitbashd issues a fresh token per
+# Process.
 if [ -n "${KITBASH_MCP_ENDPOINT:-}" ] && [ -n "${KITBASH_TELEMETRY_TOKEN:-}" ]; then
   python3 - <<'PY'
-import json, os, pathlib
+import json, os
 
-home = pathlib.Path(os.environ.get("AGENT_HOME", "/app"))
-path = home / "mcp-config.json"
+home = os.environ.get("AGENT_HOME", "/app")
+path = os.path.join(home, "mcp-config.json")
 # KITBASH_MCP_ENDPOINT already ends in /mcp (spec/kitbashd-api.yaml, environment); the
 # suffix is added only if a future daemon stops spelling it that way.
 url = os.environ["KITBASH_MCP_ENDPOINT"].rstrip("/")
 if not url.endswith("/mcp"):
     url += "/mcp"
 
-config = {}
-if path.exists():
-    try:
-        config = json.loads(path.read_text())
-    except ValueError:
-        config = {}
-servers = config.get("mcpServers") or {}
-servers["kitbash"] = {
+config = {"mcpServers": {"kitbash": {
     "type": "http",
     "url": url,
     "headers": {"Authorization": "Bearer " + os.environ["KITBASH_TELEMETRY_TOKEN"]},
-}
-config["mcpServers"] = servers
-path.write_text(json.dumps(config, indent=2))
-path.chmod(0o600)
+}}}
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as fh:
+    json.dump(config, fh, indent=2)
 print("agent: kitbash MCP server registered at", url, flush=True)
 PY
 else

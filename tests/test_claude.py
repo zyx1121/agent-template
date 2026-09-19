@@ -10,7 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+import os
+from unittest.mock import AsyncMock, patch
 
 from agent.claude import (
     ERR_AUTH,
@@ -24,6 +25,9 @@ from agent.claude import (
     _classify_error,
     _result_message,
     is_no_reply,
+    purge_stale_mcp_runtime,
+    run_turn,
+    write_mcp_runtime,
 )
 from agent.config import Settings
 
@@ -216,6 +220,119 @@ class ProgressBubbleOnFirstSend(unittest.IsolatedAsyncioTestCase):
         bubble = ProgressBubble(context, chat_id=42, on_first_send=hook)
         await bubble.add("📖 first step")
         hook.assert_not_awaited()  # no real "first send" happened, so no signal
+
+
+class McpRuntimeConfigFile(unittest.TestCase):
+    """The merged `--mcp-config` file a turn hands claude carries every server's headers,
+    which on the kitbash deploy target includes the bearer kitbashd issued to this Process.
+    It must never be readable by anyone else and must never outlive the turn, least of all in
+    run/, which is the directory a deploy keeps (a bind mount of the member's Files there)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name)
+        self.settings = _settings(self.home)
+        self.settings.run_dir.mkdir(exist_ok=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_it_is_written_0600_outside_run_dir(self):
+        path = write_mcp_runtime(self.settings, chat_id=42)
+        self.addCleanup(path.unlink, True)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertNotIn(self.settings.run_dir, path.parents)
+        self.assertEqual(json.loads(path.read_text()),
+                         _build_mcp_config(self.settings, chat_id=42))
+
+    def test_stale_configs_from_an_older_version_are_purged(self):
+        legacy = self.settings.run_dir / "mcp-runtime-42.json"
+        legacy.write_text('{"mcpServers": {"kitbash": {"headers": {"Authorization": "Bearer x"}}}}')
+        keep = self.settings.run_dir / "session-42"
+        keep.write_text("abc")
+        removed = purge_stale_mcp_runtime(self.settings)
+        self.assertEqual(removed, [legacy])
+        self.assertFalse(legacy.exists())
+        self.assertTrue(keep.exists())
+
+    def test_purge_is_quiet_when_there_is_nothing_to_purge(self):
+        self.assertEqual(purge_stale_mcp_runtime(self.settings), [])
+
+
+class _FakeClaudeProcess:
+    """Just enough of an asyncio subprocess for run_turn: one result event, empty stderr,
+    exit 0."""
+
+    def __init__(self, session_id="sess-1", reply="done"):
+        line = json.dumps({"type": "result", "result": reply, "session_id": session_id,
+                           "is_error": False}).encode()
+        self._lines = [line + b"\n"]
+        self.stdout = self
+        self.stderr = SimpleNamespace(read=AsyncMock(return_value=b""))
+
+    def __aiter__(self):
+        async def gen():
+            for line in self._lines:
+                yield line
+        return gen()
+
+    async def wait(self):
+        return 0
+
+    def kill(self):  # pragma: no cover - only reached on cancellation
+        pass
+
+
+class McpRuntimeConfigLifecycle(unittest.IsolatedAsyncioTestCase):
+    BEARER = "CANARYbearerFromKitbashd"
+
+    async def test_a_turn_deletes_its_config_and_leaves_no_bearer_in_run_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            settings = _settings(home)
+            settings.run_dir.mkdir(exist_ok=True)
+            # what the kitbash entrypoint writes at every start
+            settings.mcp_config_file.write_text(json.dumps({"mcpServers": {"kitbash": {
+                "type": "http", "url": "http://host.containers.internal:4318/mcp",
+                "headers": {"Authorization": f"Bearer {self.BEARER}"}}}}))
+            seen = {}
+
+            async def fake_exec(*cmd, **kwargs):
+                path = Path(cmd[cmd.index("--mcp-config") + 1])
+                seen["path"] = path
+                seen["mode"] = os.stat(path).st_mode & 0o777
+                seen["content"] = path.read_text()
+                return _FakeClaudeProcess()
+
+            with patch("asyncio.create_subprocess_exec", fake_exec):
+                reply, _ = await run_turn("hi", 42, _bubble_context(), settings)
+
+            self.assertEqual(reply, "done")
+            # the bearer really was in the file claude was pointed at, written 0600,
+            self.assertIn(self.BEARER, seen["content"])
+            self.assertEqual(seen["mode"], 0o600)
+            # and the file is gone now the turn is over,
+            self.assertFalse(seen["path"].exists())
+            # and nothing the deploy keeps mentions it.
+            for path in settings.run_dir.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn(self.BEARER, path.read_text(errors="replace"), str(path))
+
+    async def test_the_config_is_deleted_even_when_the_turn_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            settings = _settings(home)
+            settings.run_dir.mkdir(exist_ok=True)
+            seen = {}
+
+            async def fake_exec(*cmd, **kwargs):
+                seen["path"] = Path(cmd[cmd.index("--mcp-config") + 1])
+                raise OSError("claude is not installed")
+
+            with patch("asyncio.create_subprocess_exec", fake_exec):
+                with self.assertRaises(OSError):
+                    await run_turn("hi", 42, _bubble_context(), settings)
+            self.assertFalse(seen["path"].exists())
 
 
 if __name__ == "__main__":

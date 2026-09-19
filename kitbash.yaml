@@ -30,6 +30,12 @@ deploy:
       build: .
       # A long-poll bot: it opens a connection to Telegram and nothing opens one to it.
       expose: none
+      # A start that cannot work until a person changes a value (a secret that is not set,
+      # a bot token Telegram rejects) exits 0 with the reason in proc_logs and stays
+      # stopped: podman's on-failure carries no retry cap, so a non zero exit there would
+      # reprint the same line every few seconds for as long as nobody looks. A crash that a
+      # restart might fix exits non zero and comes back.
+      restart: on-failure
       # Names only. The member writes the values with secrets_set and kitbashd resolves
       # them into the container at every start, so neither token is in this file, in the
       # image, or on a command line. Rotating one is secrets_set plus a restart.

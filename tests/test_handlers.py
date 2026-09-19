@@ -10,11 +10,14 @@ Also covers the typing-indicator wiring: `_run_and_deliver`'s `on_output_start` 
 the final reply itself is that first message") and `_serve_turn`'s full integration (spec 1:
 immediate typing on a real message; spec 3: a scheduled/non-message turn never touches typing
 at all)."""
+import io
+import logging
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.constants import ChatAction
 
@@ -321,6 +324,106 @@ class ReplyContextTest(unittest.TestCase):
             self._msg(reply_text="x" * 5000, reply_from_id=self.BOT_ID), self.BOT_ID)
         self.assertIn("…(truncated)", out)
         self.assertLess(len(out), 5000)
+
+
+class RejectedBotTokenNeverReachesTheLog(unittest.TestCase):
+    """python-telegram-bot spells a rejected token as InvalidToken("The token `<value>` was
+    rejected by the server."), so the credential is in the exception message itself. Uncaught,
+    it lands in the process log, and a platform that restarts the process reprints it there on
+    every attempt, for anyone who can read logs. run_forever is the guard."""
+
+    CANARY = "1234567:CANARYtokenValueThatMustNotBeLogged"
+
+    def _app_that_rejects(self):
+        from telegram.error import InvalidToken
+        error = InvalidToken(f"The token `{self.CANARY}` was rejected by the server.")
+        return SimpleNamespace(run_polling=Mock(side_effect=error))
+
+    def test_the_token_value_is_absent_from_what_is_logged(self):
+        with self.assertLogs("agent", level="ERROR") as captured:
+            with self.assertRaises(SystemExit):
+                handlers.run_forever(self._app_that_rejects())
+        logged = "\n".join(captured.output)
+        self.assertNotIn(self.CANARY, logged)
+        self.assertNotIn("CANARY", logged)
+
+    def test_it_names_the_variable_to_fix(self):
+        with self.assertLogs("agent", level="ERROR") as captured:
+            with self.assertRaises(SystemExit):
+                handlers.run_forever(self._app_that_rejects())
+        self.assertIn("TELEGRAM_BOT_TOKEN", "\n".join(captured.output))
+
+    def test_it_exits_zero_so_an_on_failure_policy_does_not_loop(self):
+        # Nothing about this start can work until a human changes the value, so a restart is
+        # the same line again. See deploy/kitbash: restart is on-failure there.
+        with self.assertLogs("agent", level="ERROR"):
+            with self.assertRaises(SystemExit) as raised:
+                handlers.run_forever(self._app_that_rejects())
+        self.assertEqual(raised.exception.code, 0)
+
+    def test_any_other_startup_failure_still_propagates(self):
+        app = SimpleNamespace(run_polling=Mock(side_effect=RuntimeError("boom")))
+        with self.assertRaises(RuntimeError):
+            handlers.run_forever(app)
+
+
+class SecretsAreRedactedFromEveryLogLine(unittest.TestCase):
+    """Catching InvalidToken in run_forever is not enough on its own: python-telegram-bot
+    logs that exception, traceback and all, before it ever reaches us, and the message it
+    builds contains the whole bot token. The redacting formatter is what makes that harmless,
+    for our own logger and for every library's."""
+
+    CANARY = "1234567:CANARYtokenValueThatMustNotBeLogged"
+
+    def _record_with_the_token_in_a_traceback(self):
+        from telegram.error import InvalidToken
+        try:
+            raise InvalidToken(f"The token `{self.CANARY}` was rejected by the server.")
+        except InvalidToken:
+            return logging.LogRecord("telegram.ext", logging.ERROR, __file__, 1,
+                                     "Network Retry Loop (Bootstrap Initialize Application)",
+                                     None, sys.exc_info())
+
+    def test_the_token_is_gone_from_the_rendered_traceback(self):
+        formatter = handlers.RedactingFormatter(logging.Formatter("%(message)s"), [self.CANARY])
+        rendered = formatter.format(self._record_with_the_token_in_a_traceback())
+        self.assertIn("InvalidToken", rendered)  # the failure is still reported
+        self.assertNotIn(self.CANARY, rendered)
+        self.assertIn(handlers.REDACTED, rendered)
+        # (the word CANARY survives in the rendered source line of this test file, which is
+        # the raise above. The value is what matters and the value is gone.)
+
+    def test_an_ordinary_line_is_untouched(self):
+        formatter = handlers.RedactingFormatter(logging.Formatter("%(message)s"), [self.CANARY])
+        record = logging.LogRecord("agent", logging.INFO, __file__, 1, "bot starting", None, None)
+        self.assertEqual(formatter.format(record), "bot starting")
+
+    def test_short_or_empty_values_are_not_redacted(self):
+        # A one or two character "secret" would black out half the log.
+        formatter = handlers.RedactingFormatter(logging.Formatter("%(message)s"), ["", "ab"])
+        record = logging.LogRecord("agent", logging.INFO, __file__, 1, "abc", None, None)
+        self.assertEqual(formatter.format(record), "abc")
+
+    def test_root_handlers_are_wrapped_once(self):
+        root = logging.getLogger()
+        originals = [(h, h.formatter) for h in root.handlers]
+        self.addCleanup(lambda: [h.setFormatter(f) for h, f in originals])
+        handler = logging.StreamHandler(io.StringIO())
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(handler)
+        self.addCleanup(root.removeHandler, handler)
+
+        handlers.redact_from_logs(self.CANARY)
+        wrapped = handler.formatter
+        self.assertIsInstance(wrapped, handlers.RedactingFormatter)
+        handlers.redact_from_logs(self.CANARY)
+        self.assertIs(handler.formatter, wrapped)  # not wrapped again on a second call
+
+    def test_nothing_to_redact_changes_nothing(self):
+        root = logging.getLogger()
+        before = [(h, h.formatter) for h in root.handlers]
+        handlers.redact_from_logs("", "x")
+        self.assertEqual([(h, h.formatter) for h in root.handlers], before)
 
 
 if __name__ == "__main__":
