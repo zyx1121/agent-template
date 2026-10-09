@@ -1,0 +1,16 @@
+{
+  "name": "agent-template",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A Telegram bot whose every turn is a headless Claude Code run: persona, sessions, schedules and files included.",
+  "scripts": {
+    "start": "bun src/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.1",
+    "typescript": "5.9.3"
+  }
+}

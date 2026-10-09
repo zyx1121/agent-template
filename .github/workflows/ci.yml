@@ -1,0 +1,32 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bunx tsc --noEmit
+      - run: bun test
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t agent-template:ci .
+      # Without tokens the bot must say what is missing once and wait, not crash-loop.
+      - run: |
+          set +e; out=$(timeout 15 docker run --rm agent-template:ci 2>&1); code=$?; set -e
+          echo "$out"
+          test $code -eq 124 && echo "$out" | grep -q "TELEGRAM_BOT_TOKEN and OWNER_USER_ID must be set"
+      - run: docker run --rm --entrypoint claude agent-template:ci --version
+      - run: |
+          touch mcp-config.json && printf 'TELEGRAM_BOT_TOKEN=\nOWNER_USER_ID=\n' > .env
+          AGENT_IMAGE=agent-template:ci docker compose up -d --no-build
+          sleep 10
+          docker compose ps --format '{{.State}}' | grep -q running
+          docker compose logs | grep -q "must be set"
+          docker compose down
