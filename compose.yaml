@@ -1,0 +1,12 @@
+services:
+  agent:
+    image: ${AGENT_IMAGE:-ghcr.io/zyx1121/agent-template:latest}
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./run:/app/run
+      # Optional: extra MCP servers for every turn (kept out of the image, may hold tokens).
+      - ./mcp-config.json:/app/mcp-config.json:ro
+    # A restart lets the running turn finish first.
+    stop_grace_period: 5m
