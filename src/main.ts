@@ -23,6 +23,8 @@ const OWNER = Number(env("OWNER_USER_ID"));
 const NAME = env("AGENT_NAME", "Agent");
 const CLAUDE = env("CLAUDE_BIN", Bun.which("claude") ?? join(homedir(), ".local/bin/claude"));
 const MODEL = env("AGENT_MODEL");
+const EFFORT = env("AGENT_EFFORT");
+if (EFFORT && !["low", "medium", "high", "xhigh", "max"].includes(EFFORT)) await stuck(`AGENT_EFFORT=${EFFORT} is not one of low, medium, high, xhigh, max.`);
 const TIMEOUT_MS = Number(env("AGENT_TURN_TIMEOUT", "1800")) * 1000;
 const GROUPS = new Set(env("ALLOWED_GROUP_IDS").split(",").map((s) => s.trim()).filter(Boolean).map(Number));
 const RUN = join(HOME, "run");
@@ -179,6 +181,7 @@ async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], si
         systemPrompt: SYSTEM,
         mcpConfig: mcpConfig(t.chat),
         model: MODEL || undefined,
+        effort: EFFORT || undefined,
         resume: sid,
         timeoutMs: TIMEOUT_MS,
         env: { AGENT_OUTBOX: OUTBOX },
