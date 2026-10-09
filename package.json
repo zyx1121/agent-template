@@ -1,6 +1,6 @@
 {
   "name": "agent-template",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "A Telegram bot whose every turn is a headless Claude Code run: persona, sessions, schedules and files included.",

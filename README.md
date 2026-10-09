@@ -83,6 +83,7 @@ Set these in `.env`; [.env.example](.env.example) documents every one.
 | `ALLOWED_GROUP_IDS` | Groups the bot answers in, comma-separated | none |
 | `AGENT_NAME` | Display name, and the telemetry service name | `Agent` |
 | `AGENT_MODEL` | Claude Code model | Claude Code's default |
+| `AGENT_EFFORT` | Reasoning effort: `low`, `medium`, `high`, `xhigh` or `max` | Claude Code's default |
 | `AGENT_TURN_TIMEOUT` | Seconds before a turn is stopped | `1800` |
 | `SENSORIUM_URL`, `SENSORIUM_TOKEN` | OTLP/HTTP JSON export | off |
 
@@ -121,6 +122,7 @@ bun src/main.ts
 - Schedules missed while the bot was down are skipped, not replayed (delays under 5 minutes are caught up). Cron uses the container's clock, `Asia/Taipei` by default (`TZ`).
 - Drafts and the stop button work in private chats only; Telegram does not offer them in groups.
 - Telegram lets bots download files up to 20 MB.
+- On networks with an MTU under 1500 (VXLAN overlays such as Carrel), set Docker's MTU to match in `/etc/docker/daemon.json` (`"mtu"` and `default-network-opts`), or TLS handshakes from the container time out.
 
 ## Contributing
 

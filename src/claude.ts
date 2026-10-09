@@ -14,6 +14,7 @@ export type TurnOptions = {
   systemPrompt: string;
   mcpConfig: string;
   model?: string;
+  effort?: string;
   resume?: string;
   timeoutMs: number;
   env: Record<string, string>;
@@ -51,6 +52,7 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
     "--mcp-config", o.mcpConfig, "--strict-mcp-config",
   ];
   if (o.model) args.push("--model", o.model);
+  if (o.effort) args.push("--effort", o.effort);
   if (o.resume) args.push("--resume", o.resume);
   const p = Bun.spawn(args, { cwd: o.cwd, env: { ...process.env, ...o.env }, stdout: "pipe", stderr: "pipe" });
   const kill = () => p.kill("SIGINT");
