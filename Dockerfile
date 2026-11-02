@@ -2,7 +2,7 @@
 # A fork builds FROM this image and adds SOUL.md, .claude/skills and its own CLIs.
 FROM oven/bun:1.3.1-debian
 
-ARG CLAUDE_VERSION=2.1.295
+ARG CLAUDE_VERSION=2.1.316
 ENV DEBIAN_FRONTEND=noninteractive TZ=Asia/Taipei
 
 RUN apt-get update \

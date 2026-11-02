@@ -93,6 +93,7 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
 | `AGENT_MODEL` | Claude Code 模型 | Claude Code 預設 |
 | `AGENT_EFFORT` | `low`、`medium`、`high`、`xhigh` 或 `max` | Claude Code 預設 |
 | `AGENT_TURN_TIMEOUT` | 一輪最多幾秒後停止 | `1800` |
+| `CLAUDE_UPDATE_HOURS` | 每隔幾小時在兩輪之間跑 `claude update`，`0` 關閉 | `24` |
 | `SENSORIUM_URL`、`SENSORIUM_TOKEN` | OTLP/HTTP JSON 匯出 | 關 |
 
 額外的 MCP server 放在 `mcp-config.json`，compose 會以唯讀方式掛載。每一輪都用 `--strict-mcp-config` 執行，所以只看得到這些 server 和內建的 `schedule`：
