@@ -91,6 +91,7 @@ Set these in `.env`. [.env.example](.env.example) documents each one.
 | `AGENT_MODEL` | Claude Code model | Claude Code default |
 | `AGENT_EFFORT` | `low`, `medium`, `high`, `xhigh` or `max` | Claude Code default |
 | `AGENT_TURN_TIMEOUT` | seconds before the bot stops a turn | `1800` |
+| `CLAUDE_UPDATE_HOURS` | hours between `claude update` runs between turns, `0` turns it off | `24` |
 | `SENSORIUM_URL`, `SENSORIUM_TOKEN` | OTLP/HTTP JSON export | off |
 
 Extra MCP servers go in `mcp-config.json`, which compose mounts read-only. Turns run with `--strict-mcp-config`, so a turn sees only these servers and the builtin `schedule` server:
@@ -130,7 +131,7 @@ Facts for coding agents and LLM tools. The rules for changing the code are in [A
 - **Install**: `docker compose up -d` with `compose.yaml` and `.env` from this repo
 - **Run**: `docker compose up -d`, or `bun src/main.ts` from source
 - **Verify**: send `/start` to the bot, or `bun test && bunx tsc --noEmit`
-- **Config**: `TELEGRAM_BOT_TOKEN`, `OWNER_USER_ID`, `CLAUDE_CODE_OAUTH_TOKEN`, `ALLOWED_GROUP_IDS`, `AGENT_NAME`, `AGENT_MODEL`, `AGENT_EFFORT`, `AGENT_TURN_TIMEOUT`, `SENSORIUM_URL`, `SENSORIUM_TOKEN`
+- **Config**: `TELEGRAM_BOT_TOKEN`, `OWNER_USER_ID`, `CLAUDE_CODE_OAUTH_TOKEN`, `ALLOWED_GROUP_IDS`, `AGENT_NAME`, `AGENT_MODEL`, `AGENT_EFFORT`, `AGENT_TURN_TIMEOUT`, `CLAUDE_UPDATE_HOURS`, `SENSORIUM_URL`, `SENSORIUM_TOKEN`
 - **Secrets**: the three required tokens in `.env`, and MCP headers in `mcp-config.json`
 - **Limits**: one turn at a time. Turns bypass permissions inside the container.
 

@@ -26,6 +26,7 @@ const MODEL = env("AGENT_MODEL");
 const EFFORT = env("AGENT_EFFORT");
 if (EFFORT && !["low", "medium", "high", "xhigh", "max"].includes(EFFORT)) await stuck(`AGENT_EFFORT=${EFFORT} is not one of low, medium, high, xhigh, max.`);
 const TIMEOUT_MS = Number(env("AGENT_TURN_TIMEOUT", "1800")) * 1000;
+const UPDATE_HOURS = Number(env("CLAUDE_UPDATE_HOURS", "24"));
 const GROUPS = new Set(env("ALLOWED_GROUP_IDS").split(",").map((s) => s.trim()).filter(Boolean).map(Number));
 const RUN = join(HOME, "run");
 const OUTBOX = join(RUN, "outbox");
@@ -100,6 +101,24 @@ function enqueue(t: Turn) {
   const task = queue.then(() => serve(t));
   queue = task.catch(() => {});
   return task;
+}
+
+// ---------- Claude Code self-update ----------
+
+// `claude -p` never updates itself, so the bot runs `claude update` between turns: at start and
+// every CLAUDE_UPDATE_HOURS. The next turn spawns the new binary. A recreated container starts
+// from the image's version again and catches up on its first check.
+function updateClaude() {
+  queue = queue.then(async () => {
+    const p = Bun.spawn([CLAUDE, "update"], { stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => p.kill(), 5 * 60_000);
+    const [code, out, err] = await Promise.all([p.exited, new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    clearTimeout(timer);
+    const line = (out + err).trim().split("\n").filter(Boolean).at(-1) ?? "";
+    if (code === 0) console.log(`claude update: ${line}`);
+    else console.warn(`claude update exited ${code}: ${line}`);
+    otel.log(`claude update: ${line}`, { code }, code === 0 ? "INFO" : "WARN");
+  }).catch(console.error);
 }
 
 async function serve(t: Turn) {
@@ -348,4 +367,8 @@ await tg.call("setMyCommands", {
 }).catch(console.error);
 console.log(`${NAME} up as @${me.username}: owner ${OWNER}, groups [${[...GROUPS].join(", ")}], home ${HOME}`);
 otel.log("agent up", { bot: me.username, groups: GROUPS.size });
+if (UPDATE_HOURS > 0) {
+  updateClaude();
+  setInterval(updateClaude, UPDATE_HOURS * 3_600_000);
+}
 poll();
