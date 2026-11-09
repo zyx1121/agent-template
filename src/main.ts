@@ -332,8 +332,14 @@ setTimeout(() => {
 
 // ---------- long polling ----------
 
+// Telegram answers 502 or 504 now and then. A failing poll is a warning only
+// once it has lasted this long; shorter gaps log at INFO.
+const POLL_WARN_MS = 5 * 60_000;
+
 async function poll() {
   let offset = 0;
+  let failingSince: number | null = null;
+  let warned = false;
   for (;;) {
     try {
       const updates = await tg.call<Update[]>("getUpdates", {
@@ -341,6 +347,9 @@ async function poll() {
         timeout: 30,
         allowed_updates: ["message", "stopped_message_generation"],
       });
+      if (warned) otel.log("poll recovered", {}, "INFO");
+      failingSince = null;
+      warned = false;
       for (const u of updates) {
         offset = u.update_id + 1;
         const stop = u.stopped_message_generation;
@@ -353,7 +362,10 @@ async function poll() {
       }
     } catch (e) {
       console.error(e);
-      otel.log(`poll failed: ${e}`, {}, "WARN");
+      failingSince ??= Date.now();
+      const lasting = Date.now() - failingSince >= POLL_WARN_MS;
+      otel.log(`poll failed: ${e}`, {}, lasting && !warned ? "WARN" : "INFO");
+      if (lasting) warned = true;
       await Bun.sleep(3000);
     }
   }
