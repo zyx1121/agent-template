@@ -42,7 +42,7 @@ touch mcp-config.json
 docker compose up -d
 ```
 
-Send `/start` to the bot in a private chat. It answers when it is up. The state (sessions, schedules, files and the Claude Code session store) stays in `./run`, so an image upgrade keeps every conversation and reminder.
+Send `/start` to the bot in a private chat. It answers when it is up. The state (sessions, schedules, files and the Claude Code session store) stays in `./run`, so an image upgrade keeps your reminders and files, and every private conversation. Group chats are the exception: the upgrade that added `AGENT_OWNER_ONLY_MCP` moved group sessions to `session-<chat>-owner` and `session-<chat>-guest`, so each group starts one fresh conversation after it. The old pointer stays on disk.
 
 ## Usage
 
@@ -68,7 +68,7 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
 3. **Tokens**: get `TELEGRAM_BOT_TOKEN` from [@BotFather](https://t.me/BotFather) `/newbot`, `OWNER_USER_ID` from [@userinfobot](https://t.me/userinfobot), and `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` on a machine with a browser.
 4. Run `docker compose up -d --build`.
 
-To upgrade a fork, change the `FROM` tag.
+To upgrade a fork, change the `FROM` tag. If the fork has servers in `mcp-config.json` that carry the owner's identity, also set `AGENT_OWNER_ONLY_MCP` to list them. Without the key the owner-only set is empty, so other group members keep every server, owner logins included. That is the old behaviour, but it is not what you want for those servers.
 
 ### Talk to it
 
