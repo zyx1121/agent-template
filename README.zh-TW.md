@@ -89,6 +89,7 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
 | `OWNER_USER_ID` | bot 一定會服務的那位使用者 | 必填 |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code 驗證，來自 `claude setup-token` | 必填 |
 | `ALLOWED_GROUP_IDS` | bot 會回應的群組，用逗號分隔 | 無 |
+| `AGENT_OWNER_ONLY_MCP` | `mcp-config.json` 裡只給擁有者的 server，用逗號分隔；其他群組成員和群組排程不會拿到，也用另一個 config dir | 無 |
 | `AGENT_NAME` | 顯示名稱，也是遙測的服務名稱 | `Agent` |
 | `AGENT_MODEL` | Claude Code 模型 | Claude Code 預設 |
 | `AGENT_EFFORT` | `low`、`medium`、`high`、`xhigh` 或 `max` | Claude Code 預設 |
