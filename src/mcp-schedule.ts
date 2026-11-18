@@ -7,6 +7,10 @@ import { addSchedule, editSchedule, listSchedules, removeSchedule } from "./sche
 
 const FILE = process.env.AGENT_SCHEDULES ?? "";
 const CHAT = Number(process.env.AGENT_CHAT_ID ?? "0");
+// "chat": list, edit and remove only this chat's schedules (turns that do not act for the owner).
+const SCOPED = process.env.AGENT_SCHEDULE_SCOPE === "chat";
+const visible = (s: { chat_id: number }) => !SCOPED || s.chat_id === CHAT;
+const mine = (id: string) => listSchedules(FILE).some((s) => s.id === id && visible(s));
 
 const TOOLS = [
   {
@@ -58,15 +62,15 @@ function call(name: string, a: any): string {
     return `Added ${s.id}: "${s.cron}"${s.once ? " (once)" : ""}`;
   }
   if (name === "schedule_list") {
-    const all = listSchedules(FILE);
+    const all = listSchedules(FILE).filter(visible);
     return all.length ? JSON.stringify(all, null, 2) : "No schedules.";
   }
   if (name === "schedule_edit") {
     if (a.cron !== undefined) validateCron(a.cron);
-    const s = editSchedule(FILE, a.id, a);
+    const s = mine(a.id) ? editSchedule(FILE, a.id, a) : null;
     return s ? `Updated ${s.id}: ${JSON.stringify(s)}` : `No schedule ${a.id}`;
   }
-  if (name === "schedule_remove") return removeSchedule(FILE, a.id) ? `Removed ${a.id}` : `No schedule ${a.id}`;
+  if (name === "schedule_remove") return mine(a.id) && removeSchedule(FILE, a.id) ? `Removed ${a.id}` : `No schedule ${a.id}`;
   throw new Error(`unknown tool ${name}`);
 }
 

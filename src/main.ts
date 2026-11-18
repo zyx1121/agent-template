@@ -4,11 +4,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { parseOwnerOnly, senderLabel, turnServers } from "./access";
 import { isStaleSession, runTurn, TurnError } from "./claude";
 import { cronMatches } from "./cron";
 import { Draft } from "./draft";
 import * as otel from "./otel";
-import { addressed, isNoReply, replyContext, scheduledPrompt, senderName, stripMention, systemNote, toolLine } from "./prompts";
+import { addressed, isNoReply, replyContext, scheduledPrompt, stripMention, systemNote, toolLine } from "./prompts";
 import { listSchedules, removeSchedule, type Schedule } from "./schedules";
 import { parseCommand, quote, Telegram, type Message, type Update } from "./telegram";
 
@@ -28,11 +29,16 @@ if (EFFORT && !["low", "medium", "high", "xhigh", "max"].includes(EFFORT)) await
 const TIMEOUT_MS = Number(env("AGENT_TURN_TIMEOUT", "1800")) * 1000;
 const UPDATE_HOURS = Number(env("CLAUDE_UPDATE_HOURS", "24"));
 const GROUPS = new Set(env("ALLOWED_GROUP_IDS").split(",").map((s) => s.trim()).filter(Boolean).map(Number));
+const OWNER_ONLY_MCP = parseOwnerOnly(env("AGENT_OWNER_ONLY_MCP"));
 const RUN = join(HOME, "run");
 const OUTBOX = join(RUN, "outbox");
 const INBOX = join(RUN, "telegram");
 const SCHEDULES = join(RUN, "schedules.json");
-const sessionFile = (chat: number) => join(RUN, `session-${chat}`);
+// Turns that do not act for the owner keep their Claude Code state apart from the owner's.
+const GUEST_CONFIG = join(RUN, "claude-guest");
+// An owner turn in a group gets a new name too, so it never resumes a history that others wrote into.
+const sessionFile = (chat: number, owner: boolean) =>
+  join(RUN, !owner ? `session-${chat}-guest` : chat > 0 ? `session-${chat}` : `session-${chat}-owner`);
 
 /** A setup problem: say it once and wait, so a restart policy does not loop on the same line. */
 async function stuck(reason: string): Promise<never> {
@@ -41,7 +47,7 @@ async function stuck(reason: string): Promise<never> {
 }
 
 if (!TOKEN || !OWNER) await stuck("TELEGRAM_BOT_TOKEN and OWNER_USER_ID must be set (see .env.example).");
-for (const d of [RUN, OUTBOX, INBOX]) mkdirSync(d, { recursive: true });
+for (const d of [RUN, OUTBOX, INBOX, GUEST_CONFIG]) mkdirSync(d, { recursive: true });
 redactSecrets([TOKEN, env("CLAUDE_CODE_OAUTH_TOKEN"), env("SENSORIUM_TOKEN")]);
 
 const SOUL = existsSync(join(HOME, "SOUL.md")) ? readFileSync(join(HOME, "SOUL.md"), "utf8") : "";
@@ -69,21 +75,22 @@ function redactSecrets(secrets: string[]) {
 
 // ---------- mcp config: the builtin schedule server plus the fork's own ----------
 
-function mcpConfig(chat: number) {
+function mcpConfig(chat: number, owner: boolean) {
   const servers: Record<string, unknown> = {};
   const extra = join(HOME, "mcp-config.json");
   if (existsSync(extra)) {
     const own = JSON.parse(readFileSync(extra, "utf8")).mcpServers ?? {};
     if (own.schedule) console.warn("mcp-config.json: a 'schedule' server is ignored, the builtin one wins");
-    Object.assign(servers, own);
+    Object.assign(servers, turnServers(own, OWNER_ONLY_MCP, owner));
   }
   servers.schedule = {
     type: "stdio",
     command: process.execPath,
     args: [join(import.meta.dir, "mcp-schedule.ts")],
-    env: { AGENT_SCHEDULES: SCHEDULES, AGENT_CHAT_ID: String(chat) },
+    // Only the owner may see or change schedules of other chats.
+    env: { AGENT_SCHEDULES: SCHEDULES, AGENT_CHAT_ID: String(chat), AGENT_SCHEDULE_SCOPE: owner ? "all" : "chat" },
   };
-  const path = join(RUN, `mcp-runtime-${chat}.json`);
+  const path = join(RUN, `mcp-runtime-${chat}${owner ? "" : "-guest"}.json`);
   writeFileSync(path, JSON.stringify({ mcpServers: servers }), { mode: 0o600 });
   return path;
 }
@@ -94,7 +101,8 @@ const ACKS = ["👍", "🔥", "🎉", "👀", "🤔", "🙏", "💯", "⚡", "�
 let queue: Promise<unknown> = Promise.resolve();
 const stops = new Map<number, AbortController>(); // draft id -> its turn
 
-type Turn = { chat: number; prompt: string; message?: number; scheduled?: boolean; isPrivate: boolean };
+/** owner: the turn acts for OWNER_USER_ID (a private chat, or the owner's own message in a group). */
+type Turn = { chat: number; prompt: string; message?: number; scheduled?: boolean; isPrivate: boolean; owner: boolean };
 
 /** Turns run one at a time: a resumed session cannot run twice at once. */
 function enqueue(t: Turn) {
@@ -189,7 +197,7 @@ async function serve(t: Turn) {
 }
 
 async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], signal: AbortSignal) {
-  const file = sessionFile(t.chat);
+  const file = sessionFile(t.chat, t.owner);
   const resume = existsSync(file) ? readFileSync(file, "utf8").trim() || undefined : undefined;
   const run = (sid?: string) =>
     runTurn(
@@ -198,12 +206,12 @@ async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], si
         cwd: HOME,
         prompt: t.prompt,
         systemPrompt: SYSTEM,
-        mcpConfig: mcpConfig(t.chat),
+        mcpConfig: mcpConfig(t.chat, t.owner),
         model: MODEL || undefined,
         effort: EFFORT || undefined,
         resume: sid,
         timeoutMs: TIMEOUT_MS,
-        env: { AGENT_OUTBOX: OUTBOX },
+        env: t.owner ? { AGENT_OUTBOX: OUTBOX } : { AGENT_OUTBOX: OUTBOX, CLAUDE_CONFIG_DIR: GUEST_CONFIG },
         signal,
       },
       events,
@@ -273,7 +281,7 @@ async function onMessage(msg: Message) {
   const cmd = parseCommand(raw);
   if (cmd?.cmd === "start") return tg.send(chat, undefined, `${NAME} is up. Send a message to start; /new starts a fresh conversation.`);
   if (cmd?.cmd === "new") {
-    rmSync(sessionFile(chat), { force: true });
+    rmSync(sessionFile(chat, fromOwner), { force: true });
     return tg.send(chat, undefined, "Fresh conversation: the next message starts a new session.");
   }
 
@@ -284,15 +292,15 @@ async function onMessage(msg: Message) {
     return tg.send(chat, undefined, `⚠️ ${(e as Error).message}`, quote(msg.message_id));
   }
   let text = isPrivate ? raw.trim() : stripMention(raw, me.username);
-  if (!isPrivate && text) text = `[${senderName(msg)}]: ${text}`;
   if (attachment) {
     text =
       `${text}\n\n--- attachment (${attachment.kind}) ---\n${attachment.path} (${attachment.kb} KB)\n` +
       "(Saved at the path above; open it with your tools.)";
   }
   if (!text.trim()) return;
+  if (!isPrivate) text = `${senderLabel(msg, OWNER)}: ${text.trim()}`;
   otel.log("message", { chat, private: isPrivate, attachment: attachment?.kind });
-  await enqueue({ chat, prompt: replyContext(msg, me.id) + text.trim(), message: msg.message_id, isPrivate });
+  await enqueue({ chat, prompt: replyContext(msg, me.id) + text.trim(), message: msg.message_id, isPrivate, owner: fromOwner });
 }
 
 // ---------- schedules: a tick every minute, small delays caught up (5 minutes at most) ----------
@@ -321,7 +329,9 @@ function tick() {
 function fire(s: Schedule, at: Date) {
   if (s.once) removeSchedule(SCHEDULES, s.id);
   otel.log("schedule fired", { id: s.id, chat: s.chat_id });
-  enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0 }).catch(console.error);
+  // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
+  const owner = s.chat_id === OWNER;
+  enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
 }
 
 // Align to the start of each minute (plus a second of slack), then tick every minute.

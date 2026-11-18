@@ -87,6 +87,7 @@ Set these in `.env`. [.env.example](.env.example) documents each one.
 | `OWNER_USER_ID` | the one user that the bot always serves | required |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code auth, from `claude setup-token` | required |
 | `ALLOWED_GROUP_IDS` | groups that the bot answers in, comma-separated | none |
+| `AGENT_OWNER_ONLY_MCP` | servers in `mcp-config.json` that only the owner's turns get, comma-separated | none |
 | `AGENT_NAME` | display name and telemetry service name | `Agent` |
 | `AGENT_MODEL` | Claude Code model | Claude Code default |
 | `AGENT_EFFORT` | `low`, `medium`, `high`, `xhigh` or `max` | Claude Code default |
@@ -99,6 +100,8 @@ Extra MCP servers go in `mcp-config.json`, which compose mounts read-only. Turns
 ```json
 { "mcpServers": { "sensorium": { "type": "http", "url": "https://sensorium.example.com/mcp", "headers": { "Authorization": "Bearer <token>" } } } }
 ```
+
+A turn acts for the owner in a private chat and for the owner's own messages in a group. Other group members, and schedules that fire in a group, get a turn without the servers in `AGENT_OWNER_ONLY_MCP`, with a separate Claude Code config dir (`run/claude-guest`) and session. The owner's turns in a group keep a session of their own as well, and `/new` clears only the sender's side. The prompt names a group sender by Telegram user id, so a display name cannot pass for the owner. These turns still run as the same user in the same container: their Bash can read every file there, `mcp-config.json` included. Do not put owner tokens in files when untrusted people can reach the bot.
 
 ## How it works
 
@@ -131,7 +134,7 @@ Facts for coding agents and LLM tools. The rules for changing the code are in [A
 - **Install**: `docker compose up -d` with `compose.yaml` and `.env` from this repo
 - **Run**: `docker compose up -d`, or `bun src/main.ts` from source
 - **Verify**: send `/start` to the bot, or `bun test && bunx tsc --noEmit`
-- **Config**: `TELEGRAM_BOT_TOKEN`, `OWNER_USER_ID`, `CLAUDE_CODE_OAUTH_TOKEN`, `ALLOWED_GROUP_IDS`, `AGENT_NAME`, `AGENT_MODEL`, `AGENT_EFFORT`, `AGENT_TURN_TIMEOUT`, `CLAUDE_UPDATE_HOURS`, `SENSORIUM_URL`, `SENSORIUM_TOKEN`
+- **Config**: `TELEGRAM_BOT_TOKEN`, `OWNER_USER_ID`, `CLAUDE_CODE_OAUTH_TOKEN`, `ALLOWED_GROUP_IDS`, `AGENT_OWNER_ONLY_MCP`, `AGENT_NAME`, `AGENT_MODEL`, `AGENT_EFFORT`, `AGENT_TURN_TIMEOUT`, `CLAUDE_UPDATE_HOURS`, `SENSORIUM_URL`, `SENSORIUM_TOKEN`
 - **Secrets**: the three required tokens in `.env`, and MCP headers in `mcp-config.json`
 - **Limits**: one turn at a time. Turns bypass permissions inside the container.
 
