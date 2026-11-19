@@ -101,7 +101,15 @@ Extra MCP servers go in `mcp-config.json`, which compose mounts read-only. Turns
 { "mcpServers": { "sensorium": { "type": "http", "url": "https://sensorium.example.com/mcp", "headers": { "Authorization": "Bearer <token>" } } } }
 ```
 
-A turn acts for the owner in a private chat and for the owner's own messages in a group. Other group members, and schedules that fire in a group, get a turn without the servers in `AGENT_OWNER_ONLY_MCP`, with a separate Claude Code config dir (`run/claude-guest`) and session. The owner's turns in a group keep a session of their own as well, and `/new` clears only the sender's side. The prompt names a group sender by Telegram user id, so a display name cannot pass for the owner. These turns still run as the same user in the same container: their Bash can read every file there, `mcp-config.json` included. Do not put owner tokens in files when untrusted people can reach the bot.
+A turn acts for the owner in a private chat and for the owner's own messages in a group. Other group members, and schedules that fire in a group, get a turn without the servers in `AGENT_OWNER_ONLY_MCP`, with a separate Claude Code config dir (`run/guest/config`) and session. The owner's turns in a group keep a session of their own as well, and `/new` clears only the sender's side. The prompt names a group sender by Telegram user id, so a display name cannot pass for the owner. These turns run as a second uid, `guest` (1001), while the bot and the owner's turns run as `agent` (1000):
+
+- The image starts as root, closes `run/` to everyone but `agent` (`guest` may only enter `run/guest/`), and starts the bot as `agent` with the right to switch to `guest` and nothing else. A fork that sets its own `USER` loses the split and gets a warning.
+- A guest turn gets a scrubbed environment: `PATH`, locale, proxy variables, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_*`. It has no `TELEGRAM_BOT_TOKEN` and no fork credential such as `GH_TOKEN`. The Claude token has to stay, because that turn calls the API itself, so a guest's Bash can read it.
+- Guest state lives in `run/guest/`: `config/` (its Claude Code config dir), `work/` (its working directory), `outbox/`, `telegram/` (attachments from group members), and `sched/schedules.json`. The bot treats `sched/schedules.json` as data: it fires only well-formed entries for a group in `ALLOWED_GROUP_IDS`, always as a guest turn, whatever `chat_id` they carry. The owner's schedule tools do not list these entries.
+- `mcp-config.json` is a read-only mount, so its mode is the host's: run `chmod 600 mcp-config.json` as the user that owns `./run` (uid 1000). The entrypoint warns when `guest` can read it.
+- Guest turns still share the container's network, and servers in `mcp-config.json` that are not in `AGENT_OWNER_ONLY_MCP` still reach them.
+
+Upgrading from 1.x: this is a new major tag. Move your `FROM` to `:2`, and expect `run/claude-guest` to move to `run/guest/config` on the first start.
 
 ## How it works
 

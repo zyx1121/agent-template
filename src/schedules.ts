@@ -91,3 +91,21 @@ export function removeSchedule(path: string, id: string) {
     return data.schedules.length !== before;
   });
 }
+
+/**
+ * Schedules written by guest turns, which share no uid with the bot: the file is data, not trusted.
+ * Only well-formed entries for an allowed group survive, and the caller never runs them as the owner.
+ */
+export function guestSchedules(path: string, groups: Set<number>): Schedule[] {
+  return listSchedules(path).filter(
+    (s): s is Schedule =>
+      Boolean(s) &&
+      typeof s.id === "string" &&
+      typeof s.cron === "string" &&
+      typeof s.prompt === "string" &&
+      Number.isInteger(s.chat_id) &&
+      s.chat_id < 0 &&
+      groups.has(s.chat_id) &&
+      s.enabled === true,
+  ).map((s) => ({ ...s, note: typeof s.note === "string" ? s.note : "", once: s.once === true }));
+}

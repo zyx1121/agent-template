@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { classify } from "../src/claude";
+import { asUser, classify, guestEnv } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
-import { addSchedule, editSchedule, listSchedules, removeSchedule } from "../src/schedules";
+import { addSchedule, editSchedule, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
 import { chunkMarkdown, parseCommand } from "../src/telegram";
 
 test("cron: steps, ranges, Sunday as 7, dom OR dow", () => {
@@ -82,4 +82,29 @@ test("a turn that is not the owner's gets no owner-only server and a verified se
   expect(senderLabel({ message_id: 2, chat, from: { id: 123, first_name: "Loki" } }, 123)).toBe(
     '[from the owner, user id 123; display name "Loki"]',
   );
+});
+
+test("guest turns get a scrubbed environment and run through setpriv with no capabilities", () => {
+  const env = guestEnv(
+    { PATH: "/bin", TELEGRAM_BOT_TOKEN: "t", GH_TOKEN: "g", CLAUDE_CODE_OAUTH_TOKEN: "c", ANTHROPIC_BASE_URL: "u", HOME: "/app", SENSORIUM_TOKEN: "s" },
+    { HOME: "/home/guest" },
+  );
+  expect(env).toEqual({ PATH: "/bin", CLAUDE_CODE_OAUTH_TOKEN: "c", ANTHROPIC_BASE_URL: "u", HOME: "/home/guest" });
+  const argv = asUser(["claude", "-p"], { uid: 1001, gid: 1001 });
+  expect(argv.slice(0, 3)).toEqual(["setpriv", "--reuid", "1001"]);
+  expect(argv).toContain("--ambient-caps=-all");
+  expect(argv.slice(-2)).toEqual(["claude", "-p"]);
+});
+
+test("schedules a guest wrote are data: only well-formed entries for allowed groups", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "guest-")), "schedules.json");
+  const ok = { id: "a", cron: "* * * * *", prompt: "p", chat_id: -5, note: "n", enabled: true, once: false, created_at: "" };
+  writeFileSync(
+    file,
+    JSON.stringify({
+      schedules: [ok, { ...ok, id: "owner", chat_id: 42 }, { ...ok, id: "other", chat_id: -6 }, { ...ok, id: "bad", prompt: 1 }, { ...ok, id: "off", enabled: false }, null],
+    }),
+  );
+  expect(guestSchedules(file, new Set([-5])).map((s) => s.id)).toEqual(["a"]);
+  expect(guestSchedules(join(tmpdir(), "missing-guest.json"), new Set([-5]))).toEqual([]);
 });

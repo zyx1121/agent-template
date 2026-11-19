@@ -18,6 +18,8 @@ export type TurnOptions = {
   resume?: string;
   timeoutMs: number;
   env: Record<string, string>;
+  /** Run as this uid:gid with exactly `env` (no inherited environment). Needs setuid and setgid in the bot's capabilities. */
+  isolate?: { uid: number; gid: number };
   signal?: AbortSignal;
 };
 
@@ -43,6 +45,21 @@ export function classify(message: string, status?: number): ErrorCategory {
   return "error";
 }
 
+/** What a guest turn may inherit: the way to reach the API and nothing else (no bot token, no fork credentials). */
+const GUEST_ENV = /^(PATH|LANG|LC_[A-Z]+|TZ|TERM|HTTPS?_PROXY|NO_PROXY|ALL_PROXY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_[A-Z_]+)$/i;
+
+export function guestEnv(src: Record<string, string | undefined>, extra: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(src)) if (v !== undefined && GUEST_ENV.test(k)) out[k] = v;
+  return { ...out, ...extra };
+}
+
+/** Wrap argv so it runs as another uid with every capability dropped. */
+export const asUser = (args: string[], u: { uid: number; gid: number }) => [
+  "setpriv", "--reuid", String(u.uid), "--regid", String(u.gid), "--clear-groups",
+  "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...args,
+];
+
 export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<TurnResult> {
   const args = [
     o.claude, "-p", o.prompt,
@@ -54,7 +71,10 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
   if (o.model) args.push("--model", o.model);
   if (o.effort) args.push("--effort", o.effort);
   if (o.resume) args.push("--resume", o.resume);
-  const p = Bun.spawn(args, { cwd: o.cwd, env: { ...process.env, ...o.env }, stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(o.isolate ? asUser(args, o.isolate) : args, {
+    cwd: o.cwd,
+    env: o.isolate ? o.env : { ...process.env, ...o.env },
+    stdout: "pipe", stderr: "pipe" });
   const kill = () => p.kill("SIGINT");
   const timer = setTimeout(kill, o.timeoutMs);
   o.signal?.addEventListener("abort", kill);

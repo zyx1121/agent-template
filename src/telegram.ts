@@ -104,8 +104,8 @@ export class Telegram {
   }
 
   /** Send a file from disk: images as photos (shown inline), everything else as a document. */
-  async sendFile(chat: number, thread: number | undefined, path: string) {
-    const file = Bun.file(path);
+  async sendFile(chat: number, thread: number | undefined, path: string, bytes?: Uint8Array) {
+    const file = bytes ? new Blob([bytes as BlobPart]) : Bun.file(path);
     const name = path.split("/").pop()!;
     const photo = /\.(png|jpe?g|webp)$/i.test(name) && file.size < 10_000_000;
     const form = new FormData();
