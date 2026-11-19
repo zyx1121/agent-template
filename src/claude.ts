@@ -54,10 +54,13 @@ export function guestEnv(src: Record<string, string | undefined>, extra: Record<
   return { ...out, ...extra };
 }
 
+/** Run argv with umask 022 instead of the bot's 077, so the bot can read what a guest turn writes (outbox, schedules). */
+export const withUmask022 = (args: string[]) => ["sh", "-c", 'umask 022; exec "$@"', "sh", ...args];
+
 /** Wrap argv so it runs as another uid with every capability dropped. */
 export const asUser = (args: string[], u: { uid: number; gid: number }) => [
   "setpriv", "--reuid", String(u.uid), "--regid", String(u.gid), "--clear-groups",
-  "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...args,
+  "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...withUmask022(args),
 ];
 
 export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<TurnResult> {

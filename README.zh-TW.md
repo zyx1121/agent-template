@@ -58,15 +58,13 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
 2. **工具**：如果需要 `git`、`gh`、`curl`、`jq`、`rg` 以外的工具，就擴充映像檔：
 
    ```dockerfile
-   FROM ghcr.io/zyx1121/agent-template:1
-   USER root
+   FROM ghcr.io/zyx1121/agent-template:2
    RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && npm i -g vercel
-   USER agent
    COPY --chown=agent SOUL.md ./
    COPY --chown=agent .claude ./.claude
    ```
 
-   `.claude/skills/` 裡的 skill 會自動載入，因為 bot 是從 `/app` 執行。
+   `.claude/skills/` 裡的 skill 會自動載入，因為 bot 是從 `/app` 執行。結尾不要加 `USER agent`：映像檔維持 root，入口腳本才能把 bot（`agent`）和訪客的回合（`guest`）分開，再自己降到 `agent`。結尾設了其他 `USER` 的 fork，訪客回合會以 bot 的身分執行，讀得到它的檔案和環境變數。
 3. **權杖**：用 [@BotFather](https://t.me/BotFather) 的 `/newbot` 拿 `TELEGRAM_BOT_TOKEN`，用 [@userinfobot](https://t.me/userinfobot) 查 `OWNER_USER_ID`，在有瀏覽器的電腦上用 `claude setup-token` 拿 `CLAUDE_CODE_OAUTH_TOKEN`。
 4. 執行 `docker compose up -d --build`。
 

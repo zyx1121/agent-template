@@ -1,7 +1,7 @@
 // agent-template: a Telegram bot whose every turn is a headless Claude Code run.
 // Persona in SOUL.md, one rolling session per chat, persistent schedules, files both ways.
 
-import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "./access";
@@ -10,7 +10,7 @@ import { cronMatches } from "./cron";
 import { Draft } from "./draft";
 import * as otel from "./otel";
 import { addressed, isNoReply, replyContext, scheduledPrompt, stripMention, systemNote, toolLine } from "./prompts";
-import { guestSchedules, listSchedules, removeSchedule, type Schedule } from "./schedules";
+import { guestKey, guestSchedules, listSchedules, readRegular, removeSchedule, type Schedule } from "./schedules";
 import { parseCommand, quote, Telegram, type Message, type Update } from "./telegram";
 
 // ---------- configuration ----------
@@ -47,6 +47,8 @@ const GUEST_CONFIG = join(GUEST_DIR, "config");
 const GUEST_WORK = join(GUEST_DIR, "work");
 const GUEST_MCP = join(GUEST_DIR, "mcp");
 const GUEST_SCHEDULES = join(GUEST_DIR, "sched", "schedules.json");
+// Guest once-schedules that already fired. Owner state: the bot never writes into a directory a guest can write.
+const GUEST_FIRED = join(RUN, "guest-fired.json");
 // An owner turn in a group gets a new name too, so it never resumes a history that others wrote into.
 const sessionFile = (chat: number, owner: boolean) =>
   join(RUN, !owner ? `session-${chat}-guest` : chat > 0 ? `session-${chat}` : `session-${chat}-owner`);
@@ -259,19 +261,6 @@ function errorReply(err: TurnError, scheduled: boolean): [string, boolean] {
   return [`⚠️ claude failed: ${err.message}`, false];
 }
 
-/** A guest owns its outbox, so a name there may be a symlink to the bot's files: read regular files only, without following links. */
-function readRegular(path: string, max = 50 * 1024 * 1024): Buffer | undefined {
-  let fd: number | undefined;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const st = fstatSync(fd);
-    if (st.isFile() && st.size <= max) return readFileSync(fd);
-  } catch {}
-  finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
 async function deliverOutbox(chat: number, dir: string, guest: boolean) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
@@ -356,7 +345,7 @@ function tick() {
     const at = new Date(m * 60_000);
     const all: [Schedule, boolean][] = [
       ...listSchedules(SCHEDULES).map((s): [Schedule, boolean] => [s, false]),
-      ...guestSchedules(GUEST_SCHEDULES, GROUPS).map((s): [Schedule, boolean] => [s, true]),
+      ...guestSchedules(GUEST_SCHEDULES, GROUPS, guestFired()).map((s): [Schedule, boolean] => [s, true]),
     ];
     for (const [s, fromGuest] of all) {
       if (!s.enabled) continue;
@@ -374,16 +363,28 @@ function tick() {
 function fire(s: Schedule, at: Date, fromGuest: boolean) {
   if (s.once) {
     if (!fromGuest) removeSchedule(SCHEDULES, s.id);
-    else {
-      removeSchedule(GUEST_SCHEDULES, s.id);
-      chmodSync(GUEST_SCHEDULES, 0o644); // the rewrite is ours, the guest must still read it
-    }
+    else markGuestFired(s);
   }
   otel.log("schedule fired", { id: s.id, chat: s.chat_id });
   // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
   // A schedule a guest wrote never acts for the owner, whatever chat_id it carries.
   const owner = !fromGuest && s.chat_id === OWNER;
   enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
+}
+
+function guestFired(): Set<string> {
+  try {
+    return new Set(JSON.parse(readFileSync(GUEST_FIRED, "utf8")));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Remember a fired guest once-entry; keys whose entry the guest has since removed are dropped. */
+function markGuestFired(s: Schedule) {
+  const present = new Set(guestSchedules(GUEST_SCHEDULES, GROUPS).map(guestKey));
+  const keep = [...guestFired()].filter((k) => present.has(k));
+  writeFileSync(GUEST_FIRED, JSON.stringify([...keep, guestKey(s)]));
 }
 
 // Align to the start of each minute (plus a second of slack), then tick every minute.

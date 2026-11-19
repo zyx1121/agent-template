@@ -32,7 +32,10 @@ chown "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
 chmod 777 "$G/outbox" "$G/sched"
 chmod 755 "$G/telegram" "$G/mcp"
 chown -R guest:guest "$G/config" "$G/work"
-chmod 700 "$G/config" "$G/work"
+chmod 700 "$G/config"
+# The bot spawns guest turns with this cwd, so it enters the dir as agent before setpriv runs.
+chgrp "$AG" "$G/work"
+chmod 770 "$G/work"
 [ -e /app/.env ] && chown "agent:$AG" /app/.env && chmod 600 /app/.env
 
 # mcp-config.json is a read-only mount: its mode is the host's to set.
@@ -42,5 +45,7 @@ fi
 
 # The bot keeps the right to switch to the guest uid (setuid, setgid) and to stop its turns (kill).
 CAPS=+setuid,+setgid,+kill
+# The image ends as root, so HOME is /root: give the bot (and owner turns) agent's home back.
+export HOME=/home/agent USER=agent LOGNAME=agent
 export AGENT_GUEST_UID=$(id -u guest) AGENT_GUEST_GID=$(id -g guest) AGENT_GUEST_HOME=/home/guest
 exec setpriv --reuid agent --regid "$AG" --init-groups --inh-caps=$CAPS --ambient-caps=$CAPS --no-new-privs "$@"

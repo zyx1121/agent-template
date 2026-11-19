@@ -56,15 +56,13 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
 2. **Tools**: when turns need more than `git`, `gh`, `curl`, `jq` and `rg`, extend the image:
 
    ```dockerfile
-   FROM ghcr.io/zyx1121/agent-template:1
-   USER root
+   FROM ghcr.io/zyx1121/agent-template:2
    RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && npm i -g vercel
-   USER agent
    COPY --chown=agent SOUL.md ./
    COPY --chown=agent .claude ./.claude
    ```
 
-   Skills in `.claude/skills/` load automatically, because the bot runs from `/app`.
+   Skills in `.claude/skills/` load automatically, because the bot runs from `/app`. Do not end with `USER agent`: the image stays root so its entrypoint can split the bot (`agent`) from guest turns (`guest`) and then drop to `agent` itself. A fork that ends with another `USER` runs guest turns as the bot, with its files and environment.
 3. **Tokens**: get `TELEGRAM_BOT_TOKEN` from [@BotFather](https://t.me/BotFather) `/newbot`, `OWNER_USER_ID` from [@userinfobot](https://t.me/userinfobot), and `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` on a machine with a browser.
 4. Run `docker compose up -d --build`.
 
@@ -105,7 +103,7 @@ A turn acts for the owner in a private chat and for the owner's own messages in 
 
 - The image starts as root, closes `run/` to everyone but `agent` (`guest` may only enter `run/guest/`), and starts the bot as `agent` with the right to switch to `guest` and nothing else. A fork that sets its own `USER` loses the split and gets a warning.
 - A guest turn gets a scrubbed environment: `PATH`, locale, proxy variables, `CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_*`. It has no `TELEGRAM_BOT_TOKEN` and no fork credential such as `GH_TOKEN`. The Claude token has to stay, because that turn calls the API itself, so a guest's Bash can read it.
-- Guest state lives in `run/guest/`: `config/` (its Claude Code config dir), `work/` (its working directory), `outbox/`, `telegram/` (attachments from group members), and `sched/schedules.json`. The bot treats `sched/schedules.json` as data: it fires only well-formed entries for a group in `ALLOWED_GROUP_IDS`, always as a guest turn, whatever `chat_id` they carry. The owner's schedule tools do not list these entries.
+- Guest state lives in `run/guest/`: `config/` (its Claude Code config dir), `work/` (its working directory), `outbox/`, `telegram/` (attachments from group members), and `sched/schedules.json`. The bot treats `sched/schedules.json` as data: it fires only well-formed entries for a group in `ALLOWED_GROUP_IDS`, always as a guest turn, whatever `chat_id` they carry. The bot only reads that file (regular files only, no links): it records fired one-time entries in `run/guest-fired.json`, so they stay in the guest's list but do not fire again. The owner's schedule tools do not list these entries.
 - `mcp-config.json` is a read-only mount, so its mode is the host's: run `chmod 600 mcp-config.json` as the user that owns `./run` (uid 1000). The entrypoint warns when `guest` can read it.
 - Guest turns still share the container's network, and servers in `mcp-config.json` that are not in `AGENT_OWNER_ONLY_MCP` still reach them.
 

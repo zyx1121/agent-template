@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { asUser, classify, guestEnv } from "../src/claude";
+import { asUser, classify, guestEnv, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
-import { addSchedule, editSchedule, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
+import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
 import { chunkMarkdown, parseCommand } from "../src/telegram";
 
 test("cron: steps, ranges, Sunday as 7, dom OR dow", () => {
@@ -94,6 +94,18 @@ test("guest turns get a scrubbed environment and run through setpriv with no cap
   expect(argv.slice(0, 3)).toEqual(["setpriv", "--reuid", "1001"]);
   expect(argv).toContain("--ambient-caps=-all");
   expect(argv.slice(-2)).toEqual(["claude", "-p"]);
+  expect(argv).toContain('umask 022; exec "$@"');
+});
+
+test("a file a guest turn writes is readable by the bot despite the bot's umask 077", async () => {
+  const file = join(mkdtempSync(join(tmpdir(), "umask-")), "schedules.json");
+  const old = process.umask(0o077);
+  try {
+    await Bun.spawn(withUmask022(["sh", "-c", 'echo "{}" > "$0"', file])).exited;
+  } finally {
+    process.umask(old);
+  }
+  expect(statSync(file).mode & 0o777).toBe(0o644);
 });
 
 test("schedules a guest wrote are data: only well-formed entries for allowed groups", () => {
@@ -107,4 +119,32 @@ test("schedules a guest wrote are data: only well-formed entries for allowed gro
   );
   expect(guestSchedules(file, new Set([-5])).map((s) => s.id)).toEqual(["a"]);
   expect(guestSchedules(join(tmpdir(), "missing-guest.json"), new Set([-5]))).toEqual([]);
+});
+
+test("the bot reads guest schedules without following links or blocking on a FIFO, and skips fired ones", () => {
+  const dir = mkdtempSync(join(tmpdir(), "guest-"));
+  const ok = { id: "a", cron: "* * * * *", prompt: "p", chat_id: -5, note: "", enabled: true, once: true, created_at: "t" };
+  const real = join(dir, "real.json");
+  writeFileSync(real, JSON.stringify({ schedules: [ok] }));
+  expect(guestSchedules(real, new Set([-5]))).toHaveLength(1);
+  expect(guestSchedules(real, new Set([-5]), new Set([guestKey(ok)]))).toEqual([]);
+  const link = join(dir, "link.json");
+  symlinkSync(real, link);
+  expect(guestSchedules(link, new Set([-5]))).toEqual([]);
+  const fifo = join(dir, "fifo.json");
+  Bun.spawnSync(["mkfifo", fifo]);
+  expect(guestSchedules(fifo, new Set([-5]))).toEqual([]); // returns at once instead of hanging the bot
+});
+
+test("a rewrite keeps only schedules and never writes through a planted temp-file link", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sched-"));
+  const file = join(dir, "schedules.json");
+  const target = join(dir, "settings.json");
+  writeFileSync(target, "owner");
+  const s = { id: "a", cron: "* * * * *", prompt: "p", chat_id: -5, note: "", enabled: true, once: true, created_at: "" };
+  writeFileSync(file, JSON.stringify({ hooks: { Stop: [] }, schedules: [s, { ...s, id: "b" }] }));
+  symlinkSync(target, `${file}.${process.pid}.tmp`);
+  expect(removeSchedule(file, "a")).toBe(true);
+  expect(readFileSync(target, "utf8")).toBe("owner");
+  expect(Object.keys(JSON.parse(readFileSync(file, "utf8")))).toEqual(["schedules"]);
 });
