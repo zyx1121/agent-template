@@ -20,6 +20,10 @@ ln claude/settings.json guest/work/x
 ln -s /app/run/claude guest/sched
 # The legacy guest dir as a symlink to the owner state.
 ln -s claude claude-guest
+# Links in guest/mcp that the bot would write through.
+mkdir -p guest/mcp
+ln -s /app/run/claude/settings.json guest/mcp/mcp-runtime-1.json
+ln claude/.credentials.json guest/mcp/mcp-runtime-2.json
 chown -R 1000:1000 /app/run
 # A name that starts with two dots, left readable and not owned by agent.
 echo dots > ..x
@@ -38,6 +42,10 @@ cd /app/run
 [ -d guest/sched ] || fail "guest/sched was not recreated as a directory"
 [ "$(stat -c %a claude)" = 700 ] || fail "claude dir mode is $(stat -c %a claude)"
 [ "$(stat -c %U:%a ..x)" = agent:600 ] || fail "run/..x is $(stat -c %U:%a ..x), want agent:600"
+[ -e guest/mcp/mcp-runtime-1.json ] || [ -L guest/mcp/mcp-runtime-1.json ] && fail "the symlink in guest/mcp survived"
+[ -e guest/mcp/mcp-runtime-2.json ] && fail "the hardlink in guest/mcp survived"
+[ "$(cat claude/settings.json)" = owner ] || fail "owner settings.json changed"
+[ "$(cat claude/.credentials.json)" = secret ] || fail "owner credentials changed"
 [ -e claude-guest ] && fail "the symlinked claude-guest was not removed"
 [ -e guest/config/.credentials.json ] && fail "owner credentials were copied into guest/config"
 [ -e guest/config/settings.json ] && fail "owner settings were copied into guest/config"
