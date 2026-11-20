@@ -32,5 +32,5 @@ ENV AGENT_HOME=/app CLAUDE_CONFIG_DIR=/app/run/claude
 VOLUME /app/run
 
 # Starts as root to prepare run/ and drop to agent; a fork that sets USER keeps working, without the guest uid.
-ENTRYPOINT ["tini", "--", "agent-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/agent-entrypoint"]
 CMD ["bun", "src/main.ts"]
