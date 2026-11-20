@@ -20,3 +20,6 @@ export function senderLabel(msg: Message, owner: number) {
   const who = id === owner ? `the owner, user id ${id}` : `user id ${id ?? "unknown"}, not the owner`;
   return `[from ${who}; display name ${JSON.stringify(senderName(msg))}]`;
 }
+
+/** Guest turns need a separate uid; without one they would run as the bot with its files and environment. */
+export const turnAllowed = (owner: boolean, hasGuestUid: boolean) => owner || hasGuestUid;

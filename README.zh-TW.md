@@ -64,7 +64,7 @@ gh repo create my-agent --template zyx1121/agent-template --private --clone
    COPY --chown=agent .claude ./.claude
    ```
 
-   `.claude/skills/` 裡的 skill 會自動載入，因為 bot 是從 `/app` 執行。結尾不要加 `USER agent`：映像檔維持 root，入口腳本才能把 bot（`agent`）和訪客的回合（`guest`）分開，再自己降到 `agent`。結尾設了其他 `USER` 的 fork，訪客回合會以 bot 的身分執行，讀得到它的檔案和環境變數。
+   `.claude/skills/` 裡的 skill 會自動載入，因為 bot 是從 `/app` 執行。結尾不要加 `USER agent`：映像檔維持 root，入口腳本才能把 bot（`agent`）和訪客的回合（`guest`）分開，再自己降到 `agent`。結尾設了其他 `USER` 的 fork，bot 會在啟動時警告，拒絕群組成員的訊息，並跳過在群組觸發的排程；owner 的回合照常執行。
 3. **權杖**：用 [@BotFather](https://t.me/BotFather) 的 `/newbot` 拿 `TELEGRAM_BOT_TOKEN`，用 [@userinfobot](https://t.me/userinfobot) 查 `OWNER_USER_ID`，在有瀏覽器的電腦上用 `claude setup-token` 拿 `CLAUDE_CODE_OAUTH_TOKEN`。
 4. 執行 `docker compose up -d --build`。
 
