@@ -45,8 +45,8 @@ elif [ -d "$RUN/claude-guest" ]; then
 fi
 drop_hardlinks "$G/config" "$G/work"
 
-# Owner state: everything in run/ but guest/ belongs to agent and is closed to everyone else.
-for p in "$RUN"/* "$RUN"/.[!.]*; do
+# Owner state: everything in run/ but guest/ (names with two leading dots included) belongs to agent and is closed to everyone else.
+for p in "$RUN"/* "$RUN"/.[!.]* "$RUN"/..?*; do
   [ -e "$p" ] || continue
   [ "$p" = "$G" ] && continue
   chown -R "agent:$AG" "$p" && chmod -R go-rwx "$p" || echo "agent-entrypoint: could not close $p" >&2

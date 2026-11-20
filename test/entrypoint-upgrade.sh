@@ -21,6 +21,10 @@ ln -s /app/run/claude guest/sched
 # The legacy guest dir as a symlink to the owner state.
 ln -s claude claude-guest
 chown -R 1000:1000 /app/run
+# A name that starts with two dots, left readable and not owned by agent.
+echo dots > ..x
+chown root:root ..x
+chmod 644 ..x
 '
 $DOCKER run --rm -v "$VOL:/app/run" "$IMG" true
 
@@ -33,6 +37,7 @@ cd /app/run
 [ -L guest/sched ] && fail "guest/sched is still a symlink"
 [ -d guest/sched ] || fail "guest/sched was not recreated as a directory"
 [ "$(stat -c %a claude)" = 700 ] || fail "claude dir mode is $(stat -c %a claude)"
+[ "$(stat -c %U:%a ..x)" = agent:600 ] || fail "run/..x is $(stat -c %U:%a ..x), want agent:600"
 [ -e claude-guest ] && fail "the symlinked claude-guest was not removed"
 [ -e guest/config/.credentials.json ] && fail "owner credentials were copied into guest/config"
 [ -e guest/config/settings.json ] && fail "owner settings were copied into guest/config"
