@@ -4,7 +4,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { parseOwnerOnly, senderLabel, turnAllowed, turnServers } from "./access";
+import { parseOwnerOnly, routeMessage, routeSchedule, senderLabel, turnServers } from "./access";
 import { guestEnv, isStaleSession, runTurn, stopUser, TurnError } from "./claude";
 import { cronMatches } from "./cron";
 import { Draft } from "./draft";
@@ -317,19 +317,24 @@ async function onMessage(msg: Message) {
     }
   }
 
-  if (!turnAllowed(fromOwner, !!GUEST)) {
-    console.log(`refused guest message in ${chat} from ${msg.from?.id}: AGENT_GUEST_UID is not set`);
-    return tg.send(chat, undefined, "Sorry, I can't take messages from group members in this setup.", quote(msg.message_id));
-  }
-
   const raw = msg.text ?? msg.caption ?? "";
   const cmd = parseCommand(raw);
-  if (cmd?.cmd === "start") return tg.send(chat, undefined, `${NAME} is up. Send a message to start; /new starts a fresh conversation.`);
-  if (cmd?.cmd === "new") {
-    rmSync(sessionFile(chat, fromOwner), { force: true });
-    return tg.send(chat, undefined, "Fresh conversation: the next message starts a new session.");
-  }
+  return routeMessage(fromOwner, !!GUEST, cmd?.cmd, {
+    refuse: () => {
+      console.log(`refused guest message in ${chat} from ${msg.from?.id}: AGENT_GUEST_UID is not set`);
+      return tg.send(chat, undefined, "Sorry, I can't take messages from group members in this setup.", quote(msg.message_id));
+    },
+    start: () => tg.send(chat, undefined, `${NAME} is up. Send a message to start; /new starts a fresh conversation.`),
+    fresh: () => {
+      rmSync(sessionFile(chat, fromOwner), { force: true });
+      return tg.send(chat, undefined, "Fresh conversation: the next message starts a new session.");
+    },
+    turn: () => turnFrom(msg, raw, isPrivate, fromOwner),
+  });
+}
 
+async function turnFrom(msg: Message, raw: string, isPrivate: boolean, fromOwner: boolean) {
+  const chat = msg.chat.id;
   let attachment;
   try {
     attachment = await saveAttachment(msg, !fromOwner);
@@ -386,16 +391,14 @@ function tickMinutes() {
 }
 
 function fire(s: Schedule, at: Date, fromGuest: boolean) {
-  // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
-  // A schedule a guest wrote never acts for the owner, whatever chat_id it carries.
-  const owner = !fromGuest && s.chat_id === OWNER;
-  if (!turnAllowed(owner, !!GUEST)) return console.warn(`schedule ${s.id} skipped: AGENT_GUEST_UID is not set`);
-  if (s.once) {
-    if (!fromGuest) removeSchedule(SCHEDULES, s.id);
-    else markGuestFired(s);
-  }
-  otel.log("schedule fired", { id: s.id, chat: s.chat_id });
-  enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
+  routeSchedule(s.chat_id, OWNER, s.once, fromGuest, !!GUEST, {
+    skip: () => console.warn(`schedule ${s.id} skipped: AGENT_GUEST_UID is not set`),
+    consume: () => (fromGuest ? markGuestFired(s) : removeSchedule(SCHEDULES, s.id)),
+    run: (owner) => {
+      otel.log("schedule fired", { id: s.id, chat: s.chat_id });
+      enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
+    },
+  });
 }
 
 function guestFired(): Set<string> {
