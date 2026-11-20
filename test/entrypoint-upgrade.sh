@@ -128,27 +128,34 @@ cd /app/run
 echo "entrypoint-upgrade: migration ok"
 '
 
-# No command: refuse to start, and never print the environment (root and non-root paths).
-for u in root guest; do
+# Refusals: exit 1, the diagnostic on stderr only, nothing on stdout, no argument echoed, and the seeded
+# run/ volume left exactly as it was (the guard must run before the migration and chown/chmod).
+snapshot() { as_root 'find /app/run -exec stat -c "%n %U:%G %a %h %s %Y %i" {} + | sort'; }
+errf=$(mktemp)
+trap '$DOCKER volume rm -f "$VOL" >/dev/null; rm -f "$errf"' EXIT
+refuse() { # user, expected message, arguments...
+  u=$1 want=$2
+  shift 2
+  before=$(snapshot)
   rc=0
-  out=$($DOCKER run --rm --user "$u" -e SECRET_PROBE=leak-me --entrypoint agent-entrypoint "$IMG" 2>&1) || rc=$?
-  [ "$rc" != 0 ] || { echo "entrypoint-upgrade: $u with no command exited 0" >&2; exit 1; }
-  case $out in *"no command given, refusing to start."*) ;; *) echo "entrypoint-upgrade: $u no-command message missing" >&2; exit 1 ;; esac
-  case $out in *leak-me*) echo "entrypoint-upgrade: $u with no command printed the environment" >&2; exit 1 ;; esac
-done
+  out=$($DOCKER run --rm --user "$u" -e SECRET_PROBE=leak-me -v "$VOL:/app/run" --entrypoint agent-entrypoint "$IMG" "$@" 2>"$errf") || rc=$?
+  err=$(cat "$errf")
+  [ "$rc" = 1 ] || { echo "entrypoint-upgrade: $u refusal exited $rc, want 1" >&2; exit 1; }
+  [ -z "$out" ] || { echo "entrypoint-upgrade: $u refusal wrote to stdout" >&2; exit 1; }
+  case $err in *"$want"*) ;; *) echo "entrypoint-upgrade: $u refusal message missing on stderr" >&2; exit 1 ;; esac
+  case $out$err in *leak-me*) echo "entrypoint-upgrade: $u refusal printed the environment or an argument" >&2; exit 1 ;; esac
+  [ "$(snapshot)" = "$before" ] || { echo "entrypoint-upgrade: $u refusal changed run/" >&2; exit 1; }
+}
+
+# No command: refuse to start, and never print the environment (root and non-root paths).
+for u in root guest; do refuse "$u" "no command given, refusing to start."; done
 echo "entrypoint-upgrade: no-command ok"
 
 # A command made only of assignments: `env` would take them as variables and print the environment.
 # The probe also sits in a rejected argument, which the message must not echo.
-for u in root guest; do
-  rc=0
-  out=$($DOCKER run --rm --user "$u" -e SECRET_PROBE=leak-me --entrypoint agent-entrypoint "$IMG" FOO=bar TOKEN=leak-me 2>&1) || rc=$?
-  [ "$rc" != 0 ] || { echo "entrypoint-upgrade: $u with an assignment-only command exited 0" >&2; exit 1; }
-  case $out in *"only assignments and no program"*) ;; *) echo "entrypoint-upgrade: $u assignment message missing" >&2; exit 1 ;; esac
-  case $out in *leak-me*) echo "entrypoint-upgrade: $u with an assignment-only command printed the environment" >&2; exit 1 ;; esac
-done
+for u in root guest; do refuse "$u" "only assignments and no program" FOO=bar TOKEN=leak-me; done
 echo "entrypoint-upgrade: assignment-command ok"
 
-# An assignment followed by a program still starts on the root path, as it did before the guard.
-$DOCKER run --rm "$IMG" FOO=bar true || { echo "entrypoint-upgrade: FOO=bar true as root did not start" >&2; exit 1; }
+# An assignment followed by a program still starts on the root path, and the assignment reaches the program.
+$DOCKER run --rm "$IMG" FOO=bar sh -c 'test "$FOO" = bar' || { echo "entrypoint-upgrade: FOO=bar before a program as root did not start or did not reach it" >&2; exit 1; }
 echo "entrypoint-upgrade: assignment-with-program ok"
