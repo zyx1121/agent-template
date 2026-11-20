@@ -21,10 +21,22 @@ for d in "$G" "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched
   fi
 done
 mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
-# Before the guest uid, guest state sat in run/claude-guest.
-if [ -d "$RUN/claude-guest" ]; then
+# A 1.x guest could also hardlink an owner file into its own area: the chown -R to guest below
+# would then hand the owner's inode to guest. Drop any file with a second link before that.
+drop_hardlinks() {
+  find "$@" ! -type d -links +1 -exec sh -c 'for f; do echo "agent-entrypoint: removing hardlinked $f" >&2; rm -f "$f" || exit 1; done' sh {} + ||
+    { echo "agent-entrypoint: cannot remove hardlinks under $*, refusing to start." >&2; exit 1; }
+}
+# Before the guest uid, guest state sat in run/claude-guest. A symlinked one could point at the
+# owner's state, so it is removed without copying.
+if [ -L "$RUN/claude-guest" ]; then
+  echo "agent-entrypoint: $RUN/claude-guest is a symlink, removing it without copying." >&2
+  rm -f "$RUN/claude-guest"
+elif [ -d "$RUN/claude-guest" ]; then
+  drop_hardlinks "$RUN/claude-guest"
   cp -a "$RUN/claude-guest/." "$G/config/" && rm -rf "$RUN/claude-guest"
 fi
+drop_hardlinks "$G/config" "$G/work"
 
 # Owner state: everything in run/ but guest/ belongs to agent and is closed to everyone else.
 for p in "$RUN"/* "$RUN"/.[!.]*; do
