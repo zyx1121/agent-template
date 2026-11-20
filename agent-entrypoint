@@ -26,6 +26,10 @@ for d in "$G" "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched
   fi
 done
 mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
+# The bot rewrites run/guest/mcp on every turn, and a 1.x guest could have left links there that the
+# bot would write through. Empty it on every start (find -delete never follows a symlink).
+find "$G/mcp" -mindepth 1 -delete ||
+  { echo "agent-entrypoint: cannot empty $G/mcp, refusing to start." >&2; exit 1; }
 # A 1.x guest could also hardlink an owner file into its own area: the chown -R to guest below
 # would then hand the owner's inode to guest. Drop any such file with a second link before that.
 # A 1.x guest could not create a guest-owned inode, so links a 2.x guest made between its own files stay.
