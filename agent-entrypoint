@@ -12,6 +12,14 @@ fi
 
 AG=$(id -g agent)
 G=$RUN/guest
+# A 1.x guest could plant a symlink or a file where a directory belongs, and root would follow it
+# in the chown and chmod below. Replace anything that is not a real directory before touching it.
+for d in "$G" "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"; do
+  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+    echo "agent-entrypoint: $d is not a directory, replacing it." >&2
+    rm -f "$d" || { echo "agent-entrypoint: cannot remove $d, refusing to start." >&2; exit 1; }
+  fi
+done
 mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
 # Before the guest uid, guest state sat in run/claude-guest.
 if [ -d "$RUN/claude-guest" ]; then
@@ -24,11 +32,11 @@ for p in "$RUN"/* "$RUN"/.[!.]*; do
   [ "$p" = "$G" ] && continue
   chown -R "agent:$AG" "$p" && chmod -R go-rwx "$p" || echo "agent-entrypoint: could not close $p" >&2
 done
-chown "agent:$AG" "$RUN" "$G"
+chown -h "agent:$AG" "$RUN" "$G"
 chmod 711 "$RUN" "$G"
 
 # Guest area. The bot writes outbox, telegram and mcp (guest reads them); the guest writes the rest.
-chown "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
+chown -h "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
 chmod 777 "$G/outbox" "$G/sched"
 chmod 755 "$G/telegram" "$G/mcp"
 chown -R guest:guest "$G/config" "$G/work"
