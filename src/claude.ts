@@ -65,14 +65,17 @@ export const asUser = (args: string[], u: { uid: number; gid: number }) => [
   "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...withUmask022(args),
 ];
 
-/** Live processes whose real, effective, saved or fs uid is `uid` (zombies are skipped: they cannot run or read anything). */
+/**
+ * Live processes whose real, effective, saved or fs uid is `uid`. A zombie is skipped only when all its
+ * threads are zombies: a leader that called pthread_exit shows as a zombie while its other threads run.
+ */
 export function uidPids(uid: number, proc = "/proc"): number[] {
   const out: number[] = [];
   for (const name of readdirSync(proc)) {
     if (!/^\d+$/.test(name)) continue;
     try {
       const status = readFileSync(`${proc}/${name}/status`, "utf8");
-      if (/^State:\s+Z/m.test(status)) continue;
+      if (zombie(status) && !liveThread(`${proc}/${name}/task`)) continue;
       const uids = /^Uid:\s+(.*)$/m.exec(status)?.[1].trim().split(/\s+/).map(Number) ?? [];
       if (uids.includes(uid)) out.push(Number(name));
     } catch {} // the process exited while we looked
@@ -80,24 +83,58 @@ export function uidPids(uid: number, proc = "/proc"): number[] {
   return out;
 }
 
+const zombie = (status: string) => /^State:\s+Z/m.test(status);
+
+function liveThread(task: string) {
+  for (const tid of readdirSync(task))
+    try {
+      if (!zombie(readFileSync(`${task}/${tid}/status`, "utf8"))) return true;
+    } catch {} // the thread exited while we looked
+  return false;
+}
+
 /**
  * Stop every process of a uid, so nothing a guest turn left running (`setsid ... &`) can watch later
- * turns through /proc. The bot signals them from its own uid (it holds CAP_KILL), so a guest process
- * cannot kill the cleanup first. SIGSTOP everything, then SIGKILL, and repeat until none are left.
- * Returns the pids still alive after `rounds`.
+ * turns through /proc. Two sweeps per round:
+ * - The bot SIGSTOPs, then SIGKILLs, every match of a /proc scan from its own uid (it holds CAP_KILL),
+ *   so a guest process that kills everything of its uid cannot kill this cleanup.
+ * - A helper running as the uid calls kill(-1, SIGKILL) once. The kernel signals every process of the
+ *   uid under one lock that fork also takes, so a chain that forks and exits cannot hop past it the way
+ *   it can slip between two reads of a /proc scan.
+ * Done when the helper ran its kill (it exits 0; a guest process may kill or stop it first) and a scan after it
+ * finds nothing. Returns the pids still alive after `rounds`.
  */
 export async function stopUser(u: { uid: number; gid: number }, rounds = 20): Promise<number[]> {
   for (let i = 0; i < rounds; i++) {
-    const pids = uidPids(u.uid);
-    if (!pids.length) return [];
     for (const sig of ["SIGSTOP", "SIGKILL"] as const)
-      for (const pid of pids)
+      for (const pid of uidPids(u.uid))
         try {
           process.kill(pid, sig);
         } catch {} // already gone
+    const sweep = Bun.spawn(asUser(["sh", "-c", "kill -KILL -1 2>/dev/null; exit 0"], u), {
+      cwd: "/", env: { PATH: process.env.PATH ?? "" }, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    // A guest process can also SIGSTOP the helper, so do not wait on it for long.
+    const code = await Promise.race([sweep.exited, Bun.sleep(1000).then(() => sweep.kill("SIGKILL"))]);
+    const swept = code === 0 && sweep.signalCode == null;
+    if (swept && !uidPids(u.uid).length) return [];
     await Bun.sleep(20);
   }
   return uidPids(u.uid);
+}
+
+/** After the child exits, how long its pipes may stay open before the turn stops reading them. */
+const PIPE_GRACE_MS = 500;
+
+/** Read a stream until it ends or `stop` settles: a process the child left behind can hold the pipe open forever. */
+async function readUntil(s: ReadableStream<Uint8Array>, stop: Promise<unknown>, on: (b: Uint8Array) => void) {
+  const r = s.getReader();
+  const stopped = stop.then(() => ({ done: true as const, value: undefined }));
+  for (;;) {
+    const { done, value } = await Promise.race([r.read(), stopped]);
+    if (done) break;
+    on(value);
+  }
+  r.cancel().catch(() => {});
 }
 
 export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<TurnResult> {
@@ -126,7 +163,13 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
   let live = ""; // text of the message being streamed
   const decoder = new TextDecoder();
   let buf = "";
-  for await (const bytes of p.stdout) {
+  // A guest's Bash can reopen claude's stdout or stderr (same uid) from a detached child; stop reading
+  // shortly after claude exits instead of waiting for EOF, so the turn ends and its cleanup runs.
+  const drained = p.exited.then(() => Bun.sleep(PIPE_GRACE_MS));
+  let stderr = "";
+  const errDecoder = new TextDecoder();
+  const errRead = readUntil(p.stderr, drained, (b) => (stderr += errDecoder.decode(b, { stream: true })));
+  await readUntil(p.stdout, drained, (bytes) => {
     buf += decoder.decode(bytes, { stream: true });
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) {
@@ -151,8 +194,8 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
         ev.onText?.(done);
       } else if (e.type === "result") result = e;
     }
-  }
-  const stderr = await new Response(p.stderr).text();
+  });
+  await errRead;
   const code = await p.exited;
   clearTimeout(timer);
   if (o.signal?.aborted) throw new TurnError("Stopped.", "error");

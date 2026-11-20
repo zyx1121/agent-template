@@ -1,6 +1,6 @@
 // Run inside the built image (see .github/workflows/ci.yml): checks what the entrypoint hands the bot.
 // A guest turn must start from run/guest/work, run as the guest uid, and leave files the bot can read.
-import { readdirSync, readFileSync } from "node:fs";
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { asUser, stopUser } from "../src/claude";
 
 const fail = (m: string) => {
@@ -47,4 +47,35 @@ if (guestPids().length === 0) fail("the guest kill loop did not start");
 if ((await stopUser(guest)).length) fail("stopUser reported the guest kill loop left");
 await Bun.sleep(200);
 if (guestPids().length) fail(`the guest kill loop survived stopUser: ${guestPids().join(" ")}`);
+// A leader that calls pthread_exit shows as a zombie while its worker thread runs: it must not be skipped.
+const work = "/app/run/guest/work";
+const put = (name: string, body: string) => {
+  writeFileSync(`${work}/${name}`, body);
+  chmodSync(`${work}/${name}`, 0o644);
+};
+put("zl-worker.ts", `setInterval(() => require("node:fs").appendFileSync("${work}/zl.beat", "."), 20);`);
+put("zl.ts", `import { dlopen, FFIType } from "bun:ffi";
+new Worker(new URL("./zl-worker.ts", import.meta.url).href);
+await Bun.sleep(500);
+dlopen("libc.so.6", { pthread_exit: { args: [FFIType.ptr], returns: FFIType.void } }).symbols.pthread_exit(null);`);
+await Bun.spawn(asUser(["sh", "-c", `setsid bun ${work}/zl.ts </dev/null >/dev/null 2>&1 &`], guest), { cwd: work, env: { PATH: process.env.PATH ?? "" } }).exited;
+await Bun.sleep(1500);
+const zl = guestPids().find((p) => /^State:\s+Z/m.test(readFileSync(`/proc/${p}/status`, "utf8")));
+if (!zl) fail("the guest zombie leader did not start");
+if ((await stopUser(guest)).length) fail("stopUser reported the zombie leader left");
+const beat = statSync(`${work}/zl.beat`).size;
+await Bun.sleep(300);
+if (statSync(`${work}/zl.beat`).size !== beat) fail("the worker of a zombie leader survived stopUser");
+if (guestPids().length) fail(`the zombie leader survived stopUser: ${guestPids().join(" ")}`);
+
+// A chain of processes that fork and exit at once can sit between pids while /proc is scanned.
+put("hop.sh", `echo >> ${work}/hop.beat; (sh ${work}/hop.sh &); exit 0\n`);
+for (let i = 0; i < 40; i++) {
+  await Bun.spawn(asUser(["sh", "-c", `for n in $(seq 32); do setsid sh ${work}/hop.sh </dev/null >/dev/null 2>&1 & done`], guest), { cwd: work, env: { PATH: process.env.PATH ?? "" } }).exited;
+  await Bun.sleep(100);
+  if ((await stopUser(guest)).length) fail("stopUser reported the hop chain left");
+  const beat = statSync(`${work}/hop.beat`).size;
+  await Bun.sleep(300); // a scan of guestPids can miss a hopping chain too, so watch what it appends
+  if (statSync(`${work}/hop.beat`).size !== beat || guestPids().length) fail(`a hop chain survived stopUser in round ${i}`);
+}
 console.log("guest-smoke: ok");

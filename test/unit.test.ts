@@ -173,17 +173,38 @@ test("a rewrite keeps only schedules and never writes through a planted temp-fil
   expect(Object.keys(JSON.parse(readFileSync(file, "utf8")))).toEqual(["schedules"]);
 });
 
-test("uidPids finds live processes of a uid by any of its uids and skips zombies", () => {
+test("uidPids finds live processes of a uid by any of its uids, skipping zombies unless a thread still runs", () => {
   const proc = mkdtempSync(join(tmpdir(), "proc-"));
-  const put = (pid: string, state: string, uids: string) => {
+  const status = (state: string, uids: string) => `Name:\tx\nState:\t${state}\nUid:\t${uids}\n`;
+  const put = (pid: string, state: string, uids: string, threads: string[] = [state]) => {
     mkdirSync(join(proc, pid));
-    writeFileSync(join(proc, pid, "status"), `Name:\tx\nState:\t${state}\nUid:\t${uids}\n`);
+    writeFileSync(join(proc, pid, "status"), status(state, uids));
+    threads.forEach((t, i) => {
+      mkdirSync(join(proc, pid, "task", String(Number(pid) + i)), { recursive: true });
+      writeFileSync(join(proc, pid, "task", String(Number(pid) + i), "status"), status(t, uids));
+    });
   };
-  put("10", "S (sleeping)", "1001\t1001\t1001\t1001");
+  const guest = "1001\t1001\t1001\t1001";
+  put("10", "S (sleeping)", guest);
   put("11", "T (stopped)", "1000\t1001\t1000\t1000");
-  put("12", "Z (zombie)", "1001\t1001\t1001\t1001");
+  put("12", "Z (zombie)", guest);
   put("13", "R (running)", "1000\t1000\t1000\t1000");
+  put("15", "Z (zombie)", guest, ["Z (zombie)", "S (sleeping)"]); // the leader called pthread_exit, a worker runs
+  put("16", "Z (zombie)", guest, ["Z (zombie)", "Z (zombie)"]);
   mkdirSync(join(proc, "self"));
   mkdirSync(join(proc, "14")); // exited between readdir and read
-  expect(uidPids(1001, proc).sort()).toEqual([10, 11]);
+  expect(uidPids(1001, proc).sort()).toEqual([10, 11, 15]);
+});
+
+test("a turn ends when claude exits even if a detached child still holds its stdout and stderr", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "turn-"));
+  const fake = join(dir, "claude");
+  writeFileSync(fake, `#!/bin/sh\ncat >/dev/null\nsetsid sleep 30 &\necho $! > "${dir}/child"\necho '{"type":"result","result":"ok"}'\n`);
+  chmodSync(fake, 0o755);
+  const t0 = Date.now();
+  const r = await runTurn({ claude: fake, cwd: dir, prompt: "p", systemPrompt: "s", mcpConfig: "m", timeoutMs: 60_000, env: {} });
+  const ms = Date.now() - t0;
+  process.kill(Number(readFileSync(join(dir, "child"), "utf8")), "SIGKILL");
+  expect(r.reply).toBe("ok");
+  expect(ms).toBeLessThan(5_000);
 });
