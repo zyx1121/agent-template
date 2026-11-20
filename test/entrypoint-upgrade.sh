@@ -49,6 +49,10 @@ echo target > guest/outbox/tgt
 chmod 644 guest/outbox/tgt
 chown root:root guest/outbox/tgt
 ln -s guest/outbox/tgt ..l
+# Top-level state links a 1.x guest could plant to redirect an owner write into guest/outbox or the owner tree.
+ln -s guest/outbox session-1
+ln -s claude/settings.json guest-fired.json
+ln -s /nonexistent schedules.json
 echo shared > guest/outbox/outside
 chmod 644 guest/outbox/outside
 chown root:root guest/outbox/outside
@@ -84,8 +88,10 @@ cd /app/run
 [ "$(stat -c %U:%a ..x)" = agent:600 ] || fail "run/..x is $(stat -c %U:%a ..x), want agent:600"
 [ "$(stat -c %a guest/outbox/tgt)" = 644 ] || fail "the symlink run/..l made root change the mode of its target to $(stat -c %a guest/outbox/tgt)"
 [ "$(stat -c %U:%G guest/outbox/tgt)" = root:root ] || fail "the symlink run/..l made root change the owner of its target"
-[ -L ..l ] || fail "run/..l is no longer a symlink"
-[ "$(stat -c %U ..l)" = agent ] || fail "the symlink run/..l is owned by $(stat -c %U ..l), want agent"
+[ -e ..l ] || [ -L ..l ] && fail "the top-level symlink run/..l survived"
+[ -e session-1 ] || [ -L session-1 ] && fail "the top-level symlink run/session-1 survived"
+[ -e guest-fired.json ] || [ -L guest-fired.json ] && fail "the top-level symlink run/guest-fired.json survived"
+[ -L schedules.json ] && fail "the dangling top-level symlink run/schedules.json survived"
 [ "$(stat -c %a guest/outbox/outside)" = 644 ] || fail "an owner-side hardlink made root change the mode of outside to $(stat -c %a guest/outbox/outside)"
 [ "$(stat -c %U guest/outbox/outside)" = root ] || fail "an owner-side hardlink made root change the owner of outside"
 [ "$(cat claude/sub/linked)" = shared ] || fail "the hardlinked owner file lost its content"

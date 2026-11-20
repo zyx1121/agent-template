@@ -73,7 +73,7 @@ fi
 drop_hardlinks "$G/config" "$G/work"
 
 # Owner state: everything in run/ but guest/ (names with two leading dots included) belongs to agent and is closed to everyone else.
-# chmod follows a symlink given on the command line, so a symlink at the top of run/ gets chown -h and no chmod.
+# A symlink at the top of run/ is removed: the bot writes its state files there, and a planted link would redirect them.
 # chown and chmod also change the inode behind a file with a second link, which a 1.x guest could have
 # pointed at a file outside the owner tree. Break such a link first: the file keeps its content in a fresh inode.
 # The copy goes to a name mktemp creates exclusively, so a name the guest planted cannot redirect it.
@@ -94,7 +94,8 @@ for p in "$RUN"/* "$RUN"/.[!.]* "$RUN"/..?*; do
   [ -e "$p" ] || [ -L "$p" ] || continue
   [ "$p" = "$G" ] && continue
   if [ -L "$p" ]; then
-    chown -h "agent:$AG" "$p"
+    echo "agent-entrypoint: removing symlink $p" >&2
+    rm -f -- "$p"
   else
     break_links "$p" && chown -hR "agent:$AG" "$p" && chmod -R go-rwx "$p"
   fi || { echo "agent-entrypoint: could not close $p, refusing to start." >&2; exit 1; }
