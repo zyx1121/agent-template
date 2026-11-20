@@ -46,6 +46,12 @@ mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
 # bot would write through. Empty it on every start (find -delete never follows a symlink).
 find "$G/mcp" -mindepth 1 -delete ||
   { echo "agent-entrypoint: cannot empty $G/mcp, refusing to start." >&2; exit 1; }
+# The bot writes attachments under run/guest/telegram and follows what it finds there. A 1.x guest could
+# have planted a symlink or a hardlink (at a chat dir or a future message id). Drop every symlink, every
+# multiply linked non-directory, and any non-directory chat entry, before the chown below.
+find "$G/telegram" -mindepth 1 \( -type l -o ! -type d -links +1 \) -delete &&
+  find "$G/telegram" -mindepth 1 -maxdepth 1 ! -type d -delete ||
+  { echo "agent-entrypoint: cannot clean $G/telegram, refusing to start." >&2; exit 1; }
 # A 1.x guest could also hardlink an owner file into its own area: the chown -R to guest below
 # would then hand the owner's inode to guest. Drop any such file with a second link before that.
 # A 1.x guest could not create a guest-owned inode, so links a 2.x guest made between its own files stay.
