@@ -23,15 +23,28 @@ if (code !== 0) fail(`guest spawn exited ${code}: ${err.trim()}`);
 if (out.trim() !== String(uid)) fail(`guest ran as uid ${out.trim()}`);
 if (readFileSync(probe, "utf8").trim() !== "{}") fail("bot cannot read what the guest wrote");
 
-// A guest that chmods its own work dir to 700 must not lock out its next turn.
+// A guest that chmods its own work dir to 700 must not lock out its next turn, and the turn must start in that dir.
 {
   const g = { uid, gid: Number(process.env.AGENT_GUEST_GID) };
-  const marker = "/app/run/guest/sched/after-chmod";
-  await Bun.spawn(asUser(["sh", "-c", 'chmod 700 /app/run/guest/work; printf "#!/bin/sh\\ntouch %s\\n" "$0" > /app/run/guest/work/mark-claude; chmod 755 /app/run/guest/work/mark-claude', marker], g), { cwd: "/" }).exited;
-  await runTurn({ claude: "/app/run/guest/work/mark-claude", cwd: "/app/run/guest/work", prompt: "p", systemPrompt: "s", mcpConfig: "m",
-    timeoutMs: 5000, env: { PATH: process.env.PATH ?? "" }, isolate: g }).catch(() => {});
-  await Bun.spawn(asUser(["chmod", "770", "/app/run/guest/work"], g), { cwd: "/" }).exited;
-  if (!statSync(marker, { throwIfNoEntry: false })) fail("a guest turn did not start after the guest chmod 700 its work dir");
+  const dir = "/app/run/guest/work";
+  const id = `${process.pid}-${Date.now()}`;
+  const stub = `${dir}/chmod-stub-${id}`;
+  const marker = `/app/run/guest/sched/after-chmod-${id}`;
+  const sh = async (script: string, ...args: string[]) =>
+    (await Bun.spawn(asUser(["sh", "-c", script, ...args], g), { cwd: "/", env: { PATH: process.env.PATH ?? "" } }).exited);
+  try {
+    // The stub only leaves the marker when it runs from the work dir, then answers like claude's stream-json.
+    const body = `#!/bin/sh\ncat >/dev/null\n[ "$(pwd -P)" = ${dir} ] && touch ${marker}\necho '{"type":"result","result":"ok","session_id":"s","is_error":false}'\n`;
+    const setup = await sh('chmod 700 "$1" && printf "%s" "$2" > "$3" && chmod 755 "$3"', "sh", dir, body, stub);
+    if (setup !== 0) fail(`the chmod 700 setup exited ${setup}`);
+    const r = await runTurn({ claude: stub, cwd: dir, prompt: "p", systemPrompt: "s", mcpConfig: "m",
+      timeoutMs: 5000, env: { PATH: process.env.PATH ?? "" }, isolate: g }).catch((e) => fail(`a guest turn failed after the guest chmod 700 its work dir: ${e}`));
+    if (r.reply !== "ok") fail(`the guest turn replied ${JSON.stringify(r.reply)}`);
+    if (!statSync(marker, { throwIfNoEntry: false })) fail("a guest turn did not start in the guest work dir");
+  } finally {
+    const restore = await sh('chmod 770 "$1"; rc=$?; rm -f "$2" "$3"; exit $rc', "sh", dir, stub, marker);
+    if (restore !== 0) fail(`restoring chmod 770 exited ${restore}`);
+  }
 }
 
 // A guest turn's background process must not outlive the turn (it could read later owner turns in /proc).

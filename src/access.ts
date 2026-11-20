@@ -23,3 +23,37 @@ export function senderLabel(msg: Message, owner: number) {
 
 /** Guest turns need a separate uid; without one they would run as the bot with its files and environment. */
 export const turnAllowed = (owner: boolean, hasGuestUid: boolean) => owner || hasGuestUid;
+
+/** What `onMessage` does once a message is addressed to the bot. Side effects are injected so a test can see their order. */
+export type MessageIo<T> = {
+  refuse(): T;
+  start(): T;
+  fresh(): T;
+  /** Saves the attachment and queues the turn. */
+  turn(): T;
+};
+
+/** The guest refusal comes before /new, attachments and the queue, so a refused message leaves no trace. */
+export function routeMessage<T>(fromOwner: boolean, hasGuestUid: boolean, cmd: string | undefined, io: MessageIo<T>): T {
+  if (!turnAllowed(fromOwner, hasGuestUid)) return io.refuse();
+  if (cmd === "start") return io.start();
+  if (cmd === "new") return io.fresh();
+  return io.turn();
+}
+
+export type FireIo = {
+  skip(): void;
+  /** Removes an owner once-entry, or marks a guest one as fired. */
+  consume(): void;
+  run(owner: boolean): void;
+};
+
+/** A schedule that may not run is skipped before a once-entry is removed or marked fired, so it fires after the fix. */
+export function routeSchedule(chatId: number, ownerId: number, once: boolean, fromGuest: boolean, hasGuestUid: boolean, io: FireIo) {
+  // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
+  // A schedule a guest wrote never acts for the owner, whatever chat_id it carries.
+  const owner = !fromGuest && chatId === ownerId;
+  if (!turnAllowed(owner, hasGuestUid)) return io.skip();
+  if (once) io.consume();
+  io.run(owner);
+}
