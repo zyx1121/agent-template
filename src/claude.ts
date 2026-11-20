@@ -59,6 +59,9 @@ export function guestEnv(src: Record<string, string | undefined>, extra: Record<
 /** Run argv with umask 022 instead of the bot's 077, so the bot can read what a guest turn writes (outbox, schedules). */
 export const withUmask022 = (args: string[]) => ["sh", "-c", 'umask 022; exec "$@"', "sh", ...args];
 
+/** Run argv from `dir`, entered by whoever runs this (so after asUser has dropped privileges). */
+export const inDir = (args: string[], dir: string) => ["sh", "-c", 'cd "$0" || exit 1; exec "$@"', dir, ...args];
+
 /** Wrap argv so it runs as another uid with every capability dropped. */
 export const asUser = (args: string[], u: { uid: number; gid: number }) => [
   "setpriv", "--reuid", String(u.uid), "--regid", String(u.gid), "--clear-groups",
@@ -151,8 +154,9 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
   if (o.model) args.push("--model", o.model);
   if (o.effort) args.push("--effort", o.effort);
   if (o.resume) args.push("--resume", o.resume);
-  const p = Bun.spawn(o.isolate ? asUser(args, o.isolate) : args, {
-    cwd: o.cwd,
+  // A guest owns its work dir and can chmod it to 700, so the bot spawns from "/" and the guest enters it after setpriv.
+  const p = Bun.spawn(o.isolate ? asUser(inDir(args, o.cwd), o.isolate) : args, {
+    cwd: o.isolate ? "/" : o.cwd,
     env: o.isolate ? o.env : { ...process.env, ...o.env },
     stdin: new Blob([o.prompt]), stdout: "pipe", stderr: "pipe" });
   // A stopped process does not act on SIGINT, and a guest's Bash can SIGSTOP its own claude (same uid),
