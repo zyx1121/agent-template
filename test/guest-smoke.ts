@@ -23,6 +23,17 @@ if (code !== 0) fail(`guest spawn exited ${code}: ${err.trim()}`);
 if (out.trim() !== String(uid)) fail(`guest ran as uid ${out.trim()}`);
 if (readFileSync(probe, "utf8").trim() !== "{}") fail("bot cannot read what the guest wrote");
 
+// A guest that chmods its own work dir to 700 must not lock out its next turn.
+{
+  const g = { uid, gid: Number(process.env.AGENT_GUEST_GID) };
+  const marker = "/app/run/guest/sched/after-chmod";
+  await Bun.spawn(asUser(["sh", "-c", 'chmod 700 /app/run/guest/work; printf "#!/bin/sh\\ntouch %s\\n" "$0" > /app/run/guest/work/mark-claude; chmod 755 /app/run/guest/work/mark-claude', marker], g), { cwd: "/" }).exited;
+  await runTurn({ claude: "/app/run/guest/work/mark-claude", cwd: "/app/run/guest/work", prompt: "p", systemPrompt: "s", mcpConfig: "m",
+    timeoutMs: 5000, env: { PATH: process.env.PATH ?? "" }, isolate: g }).catch(() => {});
+  await Bun.spawn(asUser(["chmod", "770", "/app/run/guest/work"], g), { cwd: "/" }).exited;
+  if (!statSync(marker, { throwIfNoEntry: false })) fail("a guest turn did not start after the guest chmod 700 its work dir");
+}
+
 // A guest turn's background process must not outlive the turn (it could read later owner turns in /proc).
 const guest = { uid, gid: Number(process.env.AGENT_GUEST_GID) };
 const guestPids = () =>

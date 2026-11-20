@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { asUser, classify, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
+import { asUser, classify, inDir, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
 import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
@@ -95,6 +95,12 @@ test("guest turns get a scrubbed environment and run through setpriv with no cap
   expect(argv).toContain("--ambient-caps=-all");
   expect(argv.slice(-2)).toEqual(["claude", "-p"]);
   expect(argv).toContain('umask 022; exec "$@"');
+});
+
+test("inDir enters the directory before it execs argv", async () => {
+  const p = Bun.spawn(inDir(["sh", "-c", "pwd"], "/usr"), { cwd: "/", stdout: "pipe" });
+  expect((await new Response(p.stdout).text()).trim()).toBe("/usr");
+  expect(await Bun.spawn(inDir(["true"], "/nonexistent-dir"), { stderr: "ignore" }).exited).toBe(1);
 });
 
 test("a file a guest turn writes is readable by the bot despite the bot's umask 077", async () => {
