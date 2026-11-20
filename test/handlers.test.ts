@@ -138,3 +138,35 @@ test("control: a once-entry that runs is consumed from both stores", () => {
   expect(JSON.parse(readFileSync(h.firedPath, "utf8"))).toEqual([guestKey(g)]);
   expect(h.turns.length).toBe(2);
 });
+
+const docMsg = (): Message => groupMsg(MEMBER, "@testbot see this", { document: { file_id: "f1", file_name: "a.txt" } } as Partial<Message>);
+
+test("guest attachment: a symlinked chat dir is refused and nothing is written or chmodded through it", async () => {
+  const h = setup(true);
+  const { mkdirSync, symlinkSync, chmodSync, statSync } = await import("node:fs");
+  const target = join(h.dir, "target");
+  mkdirSync(target, { mode: 0o700 });
+  chmodSync(target, 0o700);
+  mkdirSync(join(h.dir, "guest-inbox"), { recursive: true });
+  symlinkSync(target, join(h.dir, "guest-inbox", String(GROUP)));
+  await h.onMessage(docMsg());
+  expect(h.sent.at(-1)?.text).toContain("not a directory");
+  expect(h.turns).toEqual([]);
+  expect(h.downloads).toEqual([]);
+  expect(statSync(target).mode & 0o777).toBe(0o700);
+});
+
+test("guest attachment: a symlink planted at the final path is not written through", async () => {
+  const h = setup(true);
+  const { mkdirSync, symlinkSync, readdirSync } = await import("node:fs");
+  const dir = join(h.dir, "guest-inbox", String(GROUP));
+  mkdirSync(dir, { recursive: true });
+  const victim = join(h.dir, "victim");
+  writeFileSync(victim, "keep");
+  symlinkSync(victim, join(dir, "10-a.txt"));
+  await h.onMessage(docMsg());
+  expect(h.sent.at(-1)?.text).toContain("symlink");
+  expect(h.turns).toEqual([]);
+  expect(readFileSync(victim, "utf8")).toBe("keep");
+  expect(readdirSync(dir)).toEqual(["10-a.txt"]); // no .part left behind
+});

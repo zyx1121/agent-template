@@ -1,6 +1,7 @@
 // The Telegram message and schedule handlers, behind a factory that takes its I/O so a test can drive them.
 
-import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { routeMessage, routeSchedule, senderLabel } from "./access";
 import * as otel from "./otel";
@@ -43,13 +44,29 @@ export function createHandlers(deps: HandlerDeps) {
     const kind = msg.document ? "document" : msg.photo ? "photo" : msg.voice ? "voice" : msg.audio ? "audio" : "video";
     const dir = join(guest ? GUEST_INBOX : INBOX, String(msg.chat.id));
     mkdirSync(dir, { recursive: true });
+    // A planted symlink or file at the chat dir must not make the bot chmod or write elsewhere.
+    if (!lstatSync(dir).isDirectory()) throw new Error(`${dir} is not a directory.`);
     if (guest) chmodSync(dir, 0o755); // the guest reads it
     const original = msg.document?.file_name ?? msg.audio?.file_name ?? msg.animation?.file_name;
-    const tmp = join(dir, `${msg.message_id}`);
-    const remote = await tg.download(f.file_id, tmp);
+    // Claim a fresh unique name exclusively, so the download never writes through a planted link.
+    const tmp = join(dir, `${msg.message_id}.${randomBytes(8).toString("hex")}.part`);
+    closeSync(openSync(tmp, "wx", 0o600));
+    let remote: string;
+    try {
+      remote = await tg.download(f.file_id, tmp);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
     const ext = remote.includes(".") ? `.${remote.split(".").pop()}` : "";
     const path = join(dir, original ? `${msg.message_id}-${original.replace(/[^\w.-]+/g, "_")}` : `${msg.message_id}${ext}`);
-    Bun.spawnSync(["mv", tmp, path]);
+    try {
+      if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${path} is a symlink.`);
+      renameSync(tmp, path);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
     if (guest) chmodSync(path, 0o644);
     return { path, kind, kb: Math.round(statSync(path).size / 1024) };
   }
