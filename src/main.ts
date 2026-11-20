@@ -4,7 +4,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { parseOwnerOnly, senderLabel, turnServers } from "./access";
+import { parseOwnerOnly, senderLabel, turnAllowed, turnServers } from "./access";
 import { guestEnv, isStaleSession, runTurn, stopUser, TurnError } from "./claude";
 import { cronMatches } from "./cron";
 import { Draft } from "./draft";
@@ -61,7 +61,7 @@ async function stuck(reason: string): Promise<never> {
 
 if (!TOKEN || !OWNER) await stuck("TELEGRAM_BOT_TOKEN and OWNER_USER_ID must be set (see .env.example).");
 for (const d of [RUN, OUTBOX, INBOX, GUEST_OUTBOX, GUEST_INBOX, GUEST_CONFIG, GUEST_WORK, GUEST_MCP, dirname(GUEST_SCHEDULES)]) mkdirSync(d, { recursive: true });
-if (!GUEST) console.warn("AGENT_GUEST_UID is not set: guest turns share the bot's uid and can read its files and environment.");
+if (!GUEST) console.warn("AGENT_GUEST_UID is not set: guest turns would share the bot's uid, so they are refused (group members) or skipped (group schedules). Owner turns still run.");
 redactSecrets([TOKEN, env("CLAUDE_CODE_OAUTH_TOKEN"), env("SENSORIUM_TOKEN")]);
 
 const SOUL = existsSync(join(HOME, "SOUL.md")) ? readFileSync(join(HOME, "SOUL.md"), "utf8") : "";
@@ -317,6 +317,11 @@ async function onMessage(msg: Message) {
     }
   }
 
+  if (!turnAllowed(fromOwner, !!GUEST)) {
+    console.log(`refused guest message in ${chat} from ${msg.from?.id}: AGENT_GUEST_UID is not set`);
+    return tg.send(chat, undefined, "Sorry, I can't take messages from group members in this setup.", quote(msg.message_id));
+  }
+
   const raw = msg.text ?? msg.caption ?? "";
   const cmd = parseCommand(raw);
   if (cmd?.cmd === "start") return tg.send(chat, undefined, `${NAME} is up. Send a message to start; /new starts a fresh conversation.`);
@@ -381,14 +386,15 @@ function tickMinutes() {
 }
 
 function fire(s: Schedule, at: Date, fromGuest: boolean) {
+  // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
+  // A schedule a guest wrote never acts for the owner, whatever chat_id it carries.
+  const owner = !fromGuest && s.chat_id === OWNER;
+  if (!turnAllowed(owner, !!GUEST)) return console.warn(`schedule ${s.id} skipped: AGENT_GUEST_UID is not set`);
   if (s.once) {
     if (!fromGuest) removeSchedule(SCHEDULES, s.id);
     else markGuestFired(s);
   }
   otel.log("schedule fired", { id: s.id, chat: s.chat_id });
-  // Anyone in a group can add a schedule there, so a group schedule never acts for the owner.
-  // A schedule a guest wrote never acts for the owner, whatever chat_id it carries.
-  const owner = !fromGuest && s.chat_id === OWNER;
   enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
 }
 

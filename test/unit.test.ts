@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
+import { parseOwnerOnly, senderLabel, turnAllowed, turnServers } from "../src/access";
 import { asUser, classify, inDir, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
@@ -225,6 +225,13 @@ test("a timed-out turn ends even if claude stopped itself, which ignores SIGINT"
   await expect(r).rejects.toBeInstanceOf(TurnError);
   expect(Date.now() - t0).toBeLessThan(300 + KILL_GRACE_MS + 2_000);
 }, 10_000);
+
+test("without a guest uid the owner is allowed and a guest is refused; with one both are allowed", () => {
+  expect(turnAllowed(true, false)).toBe(true);
+  expect(turnAllowed(false, false)).toBe(false);
+  expect(turnAllowed(true, true)).toBe(true);
+  expect(turnAllowed(false, true)).toBe(true);
+});
 
 test("readRegular returns a file of exactly max bytes, rejects one byte more and symlinks", () => {
   const dir = mkdtempSync(join(tmpdir(), "regular-"));
