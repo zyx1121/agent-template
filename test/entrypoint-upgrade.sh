@@ -24,6 +24,19 @@ ln -s claude claude-guest
 mkdir -p guest/mcp
 ln -s /app/run/claude/settings.json guest/mcp/mcp-runtime-1.json
 ln claude/.credentials.json guest/mcp/mcp-runtime-2.json
+# Planted entries under guest/telegram: a hardlink to an owner file at <chat>/<id>, a chat entry that is a
+# symlink to an owner dir, and a plain file where a chat dir belongs.
+mkdir -p claude/tdir guest/telegram/100
+echo towner > claude/tdir/f
+ln claude/settings.json guest/telegram/100/5
+ln -s /app/run/claude/tdir guest/telegram/200
+echo plain > guest/telegram/300
+# A FIFO at a future message id, and a chat dir (and a file in it) left writable by others.
+mkfifo guest/telegram/100/6
+mkdir -p guest/telegram/400
+echo att > guest/telegram/400/1
+chmod 777 guest/telegram/400
+chmod 666 guest/telegram/400/1
 chown -R 1000:1000 /app/run
 # A name that starts with two dots, left readable and not owned by agent.
 echo dots > ..x
@@ -56,6 +69,17 @@ cd /app/run
 [ -e guest/work/x ] && fail "guest/work/x was not removed"
 [ -L guest/sched ] && fail "guest/sched is still a symlink"
 [ -d guest/sched ] || fail "guest/sched was not recreated as a directory"
+[ -e guest/telegram/100/5 ] && fail "the hardlink under guest/telegram survived"
+[ -L guest/telegram/200 ] || [ -e guest/telegram/200 ] && fail "the symlinked chat dir under guest/telegram survived"
+[ -e guest/telegram/300 ] && fail "the plain file at a chat entry survived"
+[ -d guest/telegram/100 ] || fail "a real chat dir under guest/telegram was removed"
+[ -e guest/telegram/100/6 ] || [ -p guest/telegram/100/6 ] && fail "the FIFO under guest/telegram survived"
+[ "$(stat -c %U:%a guest/telegram/400)" = agent:755 ] || fail "chat dir 400 is $(stat -c %U:%a guest/telegram/400), want agent:755"
+[ "$(stat -c %U:%a guest/telegram/400/1)" = agent:644 ] || fail "guest/telegram/400/1 is $(stat -c %U:%a guest/telegram/400/1), want agent:644"
+[ "$(cat guest/telegram/400/1)" = att ] || fail "an attachment under guest/telegram lost its content"
+[ -z "$(find guest/telegram -perm /022)" ] || fail "guest/telegram still has entries writable by group or others"
+[ "$(cat claude/tdir/f)" = towner ] || fail "the target of the symlinked chat dir changed"
+[ "$(stat -c %U:%a claude/tdir/f)" = agent:600 ] || fail "claude/tdir/f is $(stat -c %U:%a claude/tdir/f), want agent:600"
 [ "$(stat -c %a claude)" = 700 ] || fail "claude dir mode is $(stat -c %a claude)"
 [ "$(stat -c %U:%a ..x)" = agent:600 ] || fail "run/..x is $(stat -c %U:%a ..x), want agent:600"
 [ "$(stat -c %a guest/outbox/tgt)" = 644 ] || fail "the symlink run/..l made root change the mode of its target to $(stat -c %a guest/outbox/tgt)"

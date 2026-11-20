@@ -46,6 +46,13 @@ mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
 # bot would write through. Empty it on every start (find -delete never follows a symlink).
 find "$G/mcp" -mindepth 1 -delete ||
   { echo "agent-entrypoint: cannot empty $G/mcp, refusing to start." >&2; exit 1; }
+# The bot writes attachments under run/guest/telegram and follows what it finds there. A 1.x guest could
+# have planted a symlink, a hardlink or a FIFO (at a chat dir or a future message id). Drop every entry
+# that is neither a regular file nor a directory, every multiply linked non-directory, and any
+# non-directory chat entry, before the chown below.
+find "$G/telegram" -mindepth 1 \( -type l -o \( ! -type d ! -type f \) -o \( ! -type d -links +1 \) \) -delete &&
+  find "$G/telegram" -mindepth 1 -maxdepth 1 ! -type d -delete ||
+  { echo "agent-entrypoint: cannot clean $G/telegram, refusing to start." >&2; exit 1; }
 # A 1.x guest could also hardlink an owner file into its own area: the chown -R to guest below
 # would then hand the owner's inode to guest. Drop any such file with a second link before that.
 # A 1.x guest could not create a guest-owned inode, so links a 2.x guest made between its own files stay.
@@ -99,6 +106,10 @@ chmod 711 "$RUN" "$G"
 chown -h "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
 chmod 777 "$G/outbox" "$G/sched"
 chmod 755 "$G/telegram" "$G/mcp"
+# A 1.x guest could leave a chat dir open to others, where a guest turn would plant a link after the
+# cleanup above. That cleanup removed every symlink and hardlink, so the recursive chown and chmod are safe.
+chown -hR "agent:$AG" "$G/telegram" && chmod -R go-w "$G/telegram" ||
+  { echo "agent-entrypoint: cannot close $G/telegram, refusing to start." >&2; exit 1; }
 chown -R guest:guest "$G/config" "$G/work"
 chmod 700 "$G/config"
 # The bot is in the group so it can read and clean up what a guest turn leaves here. Guest turns enter the dir after setpriv, so a chmod 700 by the guest does not lock them out.
