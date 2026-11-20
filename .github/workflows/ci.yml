@@ -27,6 +27,8 @@ jobs:
       - run: docker run --rm -v "$PWD/test:/app/test:ro" agent-template:ci bun test/guest-smoke.ts
       # Root at startup must not follow links a 1.x guest could have planted in run/.
       - run: sh test/entrypoint-upgrade.sh agent-template:ci
+      # Root must not resolve commands through /home/agent/.local/bin, and the bot must still have it.
+      - run: sh test/path-split.sh agent-template:ci
       - run: |
           touch mcp-config.json && printf 'TELEGRAM_BOT_TOKEN=\nOWNER_USER_ID=\n' > .env
           AGENT_IMAGE=agent-template:ci docker compose up -d --no-build
