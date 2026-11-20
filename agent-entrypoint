@@ -17,11 +17,33 @@ fi
 
 AG=$(id -g agent)
 G=$RUN/guest
+# A 1.x guest could plant a symlink or a file where a directory belongs, and root would follow it
+# in the chown and chmod below. Replace anything that is not a real directory before touching it.
+for d in "$G" "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"; do
+  if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
+    echo "agent-entrypoint: $d is not a directory, replacing it." >&2
+    rm -f "$d" || { echo "agent-entrypoint: cannot remove $d, refusing to start." >&2; exit 1; }
+  fi
+done
 mkdir -p "$G/outbox" "$G/telegram" "$G/config" "$G/work" "$G/mcp" "$G/sched"
-# Before the guest uid, guest state sat in run/claude-guest.
-if [ -d "$RUN/claude-guest" ]; then
-  cp -a "$RUN/claude-guest/." "$G/config/" && rm -rf "$RUN/claude-guest"
+# A 1.x guest could also hardlink an owner file into its own area: the chown -R to guest below
+# would then hand the owner's inode to guest. Drop any such file with a second link before that.
+# A 1.x guest could not create a guest-owned inode, so links a 2.x guest made between its own files stay.
+drop_hardlinks() {
+  find "$@" ! -type d -links +1 ! -user guest -exec sh -c 'for f; do echo "agent-entrypoint: removing hardlinked $f" >&2; rm -f "$f" || exit 1; done' sh {} + ||
+    { echo "agent-entrypoint: cannot remove hardlinks under $*, refusing to start." >&2; exit 1; }
+}
+# Before the guest uid, guest state sat in run/claude-guest. A symlinked one could point at the
+# owner's state, so it is removed without copying. A real one replaces guest/config by a rename:
+# 1.x had no guest/config, so anything there was planted, and a copy would write through its links.
+if [ -L "$RUN/claude-guest" ]; then
+  echo "agent-entrypoint: $RUN/claude-guest is a symlink, removing it without copying." >&2
+  rm -f "$RUN/claude-guest"
+elif [ -d "$RUN/claude-guest" ]; then
+  rm -rf "$G/config" && mv "$RUN/claude-guest" "$G/config" ||
+    { echo "agent-entrypoint: cannot move $RUN/claude-guest to $G/config, refusing to start." >&2; exit 1; }
 fi
+drop_hardlinks "$G/config" "$G/work"
 
 # Owner state: everything in run/ but guest/ belongs to agent and is closed to everyone else.
 for p in "$RUN"/* "$RUN"/.[!.]*; do
@@ -29,11 +51,11 @@ for p in "$RUN"/* "$RUN"/.[!.]*; do
   [ "$p" = "$G" ] && continue
   chown -R "agent:$AG" "$p" && chmod -R go-rwx "$p" || echo "agent-entrypoint: could not close $p" >&2
 done
-chown "agent:$AG" "$RUN" "$G"
+chown -h "agent:$AG" "$RUN" "$G"
 chmod 711 "$RUN" "$G"
 
 # Guest area. The bot writes outbox, telegram and mcp (guest reads them); the guest writes the rest.
-chown "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
+chown -h "agent:$AG" "$G/outbox" "$G/telegram" "$G/mcp" "$G/sched"
 chmod 777 "$G/outbox" "$G/sched"
 chmod 755 "$G/telegram" "$G/mcp"
 chown -R guest:guest "$G/config" "$G/work"
