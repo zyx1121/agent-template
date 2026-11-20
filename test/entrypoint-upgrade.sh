@@ -56,7 +56,7 @@ cd /app/run
 [ "$(stat -c %a guest/outbox/tgt)" = 644 ] || fail "the symlink run/..l made root change the mode of its target to $(stat -c %a guest/outbox/tgt)"
 [ "$(stat -c %U:%G guest/outbox/tgt)" = root:root ] || fail "the symlink run/..l made root change the owner of its target"
 [ -L ..l ] || fail "run/..l is no longer a symlink"
-[ "$(stat -c %U -h ..l)" = agent ] || fail "the symlink run/..l is owned by $(stat -c %U -h ..l), want agent"
+[ "$(stat -c %U ..l)" = agent ] || fail "the symlink run/..l is owned by $(stat -c %U ..l), want agent"
 [ "$(stat -c %a guest/outbox/outside)" = 644 ] || fail "an owner-side hardlink made root change the mode of outside to $(stat -c %a guest/outbox/outside)"
 [ "$(stat -c %U guest/outbox/outside)" = root ] || fail "an owner-side hardlink made root change the owner of outside"
 [ "$(cat claude/sub/linked)" = shared ] || fail "the hardlinked owner file lost its content"
