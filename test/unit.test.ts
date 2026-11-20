@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, routeMessage, routeSchedule, senderLabel, turnAllowed, turnServers } from "../src/access";
 import { asUser, classify, inDir, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
+import { clearOutbox } from "../src/outbox";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
 import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, readRegular, removeSchedule } from "../src/schedules";
@@ -276,4 +277,23 @@ test("readRegular returns a file of exactly max bytes, rejects one byte more and
   expect(readRegular(exact, 100000)?.length).toBe(100000);
   expect(readRegular(over, 100000)).toBeUndefined();
   expect(readRegular(link, 100000)).toBeUndefined();
+});
+
+test("clearOutbox logs an entry it cannot remove and still clears the rest", () => {
+  const dir = mkdtempSync(join(tmpdir(), "outbox-"));
+  writeFileSync(join(dir, "a.txt"), "a");
+  mkdirSync(join(dir, "stuck"));
+  writeFileSync(join(dir, "stuck", "inner"), "x");
+  chmodSync(join(dir, "stuck"), 0o500); // entries cannot be unlinked from it
+  const logs: string[] = [];
+  try {
+    clearOutbox(dir, (m) => logs.push(m));
+    expect(existsSync(join(dir, "a.txt"))).toBe(false);
+    if (process.getuid?.() !== 0) {
+      expect(logs.length).toBe(1);
+      expect(logs[0]).toContain("stuck");
+    }
+  } finally {
+    chmodSync(join(dir, "stuck"), 0o700);
+  }
 });
