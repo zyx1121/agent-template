@@ -38,7 +38,7 @@ chmod 777 "$G/outbox" "$G/sched"
 chmod 755 "$G/telegram" "$G/mcp"
 chown -R guest:guest "$G/config" "$G/work"
 chmod 700 "$G/config"
-# The bot spawns guest turns with this cwd, so it enters the dir as agent before setpriv runs.
+# The bot is in the group so it can write inbox files here; guest turns enter the dir after setpriv, so a chmod 700 by the guest does not lock them out.
 chgrp "$AG" "$G/work"
 chmod 770 "$G/work"
 [ -e /app/.env ] && chown "agent:$AG" /app/.env && chmod 600 /app/.env
