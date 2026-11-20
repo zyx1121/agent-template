@@ -91,3 +91,13 @@ cd /app/run
 [ "$(cat guest/config/.credentials.json)" = guest-creds ] || fail "guest credentials were not migrated"
 echo "entrypoint-upgrade: migration ok"
 '
+
+# No command: refuse to start, and never print the environment (root and non-root paths).
+for u in root guest; do
+  rc=0
+  out=$($DOCKER run --rm --user "$u" -e SECRET_PROBE=leak-me --entrypoint agent-entrypoint "$IMG" 2>&1) || rc=$?
+  [ "$rc" != 0 ] || { echo "entrypoint-upgrade: $u with no command exited 0" >&2; exit 1; }
+  case $out in *"no command given, refusing to start."*) ;; *) echo "entrypoint-upgrade: $u no-command message missing" >&2; exit 1 ;; esac
+  case $out in *leak-me*) echo "entrypoint-upgrade: $u with no command printed the environment" >&2; exit 1 ;; esac
+done
+echo "entrypoint-upgrade: no-command ok"

@@ -9,6 +9,12 @@ BOT_PATH=$PATH
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 RUN=/app/run
 
+# With no command, `env` below would print the whole environment, tokens included, to the log.
+if [ "$#" -eq 0 ]; then
+  echo "agent-entrypoint: no command given, refusing to start." >&2
+  exit 1
+fi
+
 if [ "$(id -u)" != 0 ]; then
   echo "agent-entrypoint: not started as root, so guest turns cannot get their own uid and share the bot's." >&2
   PATH=$BOT_PATH
