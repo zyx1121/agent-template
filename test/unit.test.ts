@@ -6,7 +6,7 @@ import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
 import { asUser, classify, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
-import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
+import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, readRegular, removeSchedule } from "../src/schedules";
 import { chunkMarkdown, parseCommand } from "../src/telegram";
 
 test("cron: steps, ranges, Sunday as 7, dom OR dow", () => {
@@ -219,3 +219,16 @@ test("a timed-out turn ends even if claude stopped itself, which ignores SIGINT"
   await expect(r).rejects.toBeInstanceOf(TurnError);
   expect(Date.now() - t0).toBeLessThan(300 + KILL_GRACE_MS + 2_000);
 }, 10_000);
+
+test("readRegular returns a file of exactly max bytes, rejects one byte more and symlinks", () => {
+  const dir = mkdtempSync(join(tmpdir(), "regular-"));
+  const exact = join(dir, "exact");
+  const over = join(dir, "over");
+  const link = join(dir, "link");
+  writeFileSync(exact, "a".repeat(100000));
+  writeFileSync(over, "a".repeat(100001));
+  symlinkSync(exact, link);
+  expect(readRegular(exact, 100000)?.length).toBe(100000);
+  expect(readRegular(over, 100000)).toBeUndefined();
+  expect(readRegular(link, 100000)).toBeUndefined();
+});
