@@ -1,6 +1,8 @@
 // One headless Claude Code turn: `claude -p --output-format stream-json`, with streamed text and
 // tool steps reported as they happen, per-chat --resume, and failures classified for delivery.
 
+import { readdirSync, readFileSync } from "node:fs";
+
 export type TurnEvents = {
   /** The assistant text of this turn so far (all text blocks, grows as tokens arrive). */
   onText?: (text: string) => void;
@@ -63,12 +65,39 @@ export const asUser = (args: string[], u: { uid: number; gid: number }) => [
   "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...withUmask022(args),
 ];
 
+/** Live processes whose real, effective, saved or fs uid is `uid` (zombies are skipped: they cannot run or read anything). */
+export function uidPids(uid: number, proc = "/proc"): number[] {
+  const out: number[] = [];
+  for (const name of readdirSync(proc)) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const status = readFileSync(`${proc}/${name}/status`, "utf8");
+      if (/^State:\s+Z/m.test(status)) continue;
+      const uids = /^Uid:\s+(.*)$/m.exec(status)?.[1].trim().split(/\s+/).map(Number) ?? [];
+      if (uids.includes(uid)) out.push(Number(name));
+    } catch {} // the process exited while we looked
+  }
+  return out;
+}
+
 /**
  * Stop every process of a uid, so nothing a guest turn left running (`setsid ... &`) can watch later
- * turns through /proc. The shell runs as that uid and kill(-1) spares only itself.
+ * turns through /proc. The bot signals them from its own uid (it holds CAP_KILL), so a guest process
+ * cannot kill the cleanup first. SIGSTOP everything, then SIGKILL, and repeat until none are left.
+ * Returns the pids still alive after `rounds`.
  */
-export async function stopUser(u: { uid: number; gid: number }) {
-  await Bun.spawn(asUser(["sh", "-c", "kill -KILL -1 2>/dev/null; true"], u), { env: { PATH: process.env.PATH ?? "" }, stdout: "ignore", stderr: "ignore" }).exited;
+export async function stopUser(u: { uid: number; gid: number }, rounds = 20): Promise<number[]> {
+  for (let i = 0; i < rounds; i++) {
+    const pids = uidPids(u.uid);
+    if (!pids.length) return [];
+    for (const sig of ["SIGSTOP", "SIGKILL"] as const)
+      for (const pid of pids)
+        try {
+          process.kill(pid, sig);
+        } catch {} // already gone
+    await Bun.sleep(20);
+  }
+  return uidPids(u.uid);
 }
 
 export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<TurnResult> {

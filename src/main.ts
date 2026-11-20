@@ -243,8 +243,13 @@ async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], si
       events,
     );
   let result;
-  // No guest process may outlive its turn or see the next one: stop them before and after every turn.
-  if (GUEST) await stopUser(GUEST);
+  // No guest process may outlive its turn or see the next one: stop them before and after every turn,
+  // and refuse the turn while any are left.
+  const left = GUEST ? await stopUser(GUEST) : [];
+  if (left.length) {
+    console.error(`guest processes could not be stopped: ${left.join(" ")}`);
+    throw new TurnError("guest processes from an earlier turn could not be stopped; refusing the turn.", "error");
+  }
   try {
     result = await run(resume);
   } catch (e) {
@@ -252,7 +257,8 @@ async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], si
     console.warn(`session ${resume} could not be resumed, starting fresh`);
     result = await run(undefined);
   } finally {
-    if (GUEST) await stopUser(GUEST);
+    const left = GUEST ? await stopUser(GUEST) : [];
+    if (left.length) console.error(`guest processes could not be stopped: ${left.join(" ")}`);
   }
   if (result.sessionId) writeFileSync(file, result.sessionId);
   return result;

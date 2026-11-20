@@ -36,7 +36,15 @@ const guestPids = () =>
 await Bun.spawn(asUser(["sh", "-c", "setsid sleep 300 </dev/null >/dev/null 2>&1 &"], guest), { cwd: "/app/run/guest/work", env: { PATH: process.env.PATH ?? "" } }).exited;
 await Bun.sleep(200);
 if (guestPids().length === 0) fail("the background guest process did not start");
-await stopUser(guest);
+if ((await stopUser(guest)).length) fail("stopUser reported guest processes left");
 await Bun.sleep(200);
 if (guestPids().length) fail(`guest processes survived stopUser: ${guestPids().join(" ")}`);
+
+// A guest process that kills everything of its uid in a loop must not survive either: the bot signals from its own uid.
+await Bun.spawn(asUser(["sh", "-c", "setsid sh -c 'while :; do kill -KILL -1; done' </dev/null >/dev/null 2>&1 &"], guest), { cwd: "/app/run/guest/work", env: { PATH: process.env.PATH ?? "" } }).exited;
+await Bun.sleep(200);
+if (guestPids().length === 0) fail("the guest kill loop did not start");
+if ((await stopUser(guest)).length) fail("stopUser reported the guest kill loop left");
+await Bun.sleep(200);
+if (guestPids().length) fail(`the guest kill loop survived stopUser: ${guestPids().join(" ")}`);
 console.log("guest-smoke: ok");

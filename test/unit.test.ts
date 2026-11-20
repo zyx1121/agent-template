@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { asUser, classify, guestEnv, runTurn, withUmask022 } from "../src/claude";
+import { asUser, classify, guestEnv, runTurn, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
 import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
@@ -171,4 +171,19 @@ test("a rewrite keeps only schedules and never writes through a planted temp-fil
   expect(removeSchedule(file, "a")).toBe(true);
   expect(readFileSync(target, "utf8")).toBe("owner");
   expect(Object.keys(JSON.parse(readFileSync(file, "utf8")))).toEqual(["schedules"]);
+});
+
+test("uidPids finds live processes of a uid by any of its uids and skips zombies", () => {
+  const proc = mkdtempSync(join(tmpdir(), "proc-"));
+  const put = (pid: string, state: string, uids: string) => {
+    mkdirSync(join(proc, pid));
+    writeFileSync(join(proc, pid, "status"), `Name:\tx\nState:\t${state}\nUid:\t${uids}\n`);
+  };
+  put("10", "S (sleeping)", "1001\t1001\t1001\t1001");
+  put("11", "T (stopped)", "1000\t1001\t1000\t1000");
+  put("12", "Z (zombie)", "1001\t1001\t1001\t1001");
+  put("13", "R (running)", "1000\t1000\t1000\t1000");
+  mkdirSync(join(proc, "self"));
+  mkdirSync(join(proc, "14")); // exited between readdir and read
+  expect(uidPids(1001, proc).sort()).toEqual([10, 11]);
 });
