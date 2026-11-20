@@ -1,9 +1,9 @@
 // The Telegram message and schedule handlers, behind a factory that takes its I/O so a test can drive them.
 
-import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { routeMessage, routeSchedule, senderLabel } from "./access";
-import * as otel from "./otel";
 import { addressed, replyContext, scheduledPrompt, stripMention } from "./prompts";
 import type { Schedule } from "./schedules";
 import { parseCommand, quote, type Message, type Telegram } from "./telegram";
@@ -31,10 +31,12 @@ export type HandlerDeps = {
   /** Remembers a fired guest once-entry. */
   markGuestFired(s: Schedule): void;
   enqueue(t: Turn): Promise<unknown>;
+  /** Telemetry sink, `otel.log` in production. Injected so importing this module starts no exporter. */
+  log(event: string, attrs?: Record<string, string | number | boolean | undefined>): void;
 };
 
 export function createHandlers(deps: HandlerDeps) {
-  const { tg, me, OWNER, GROUPS, NAME, GUEST, RUN, INBOX, GUEST_INBOX, enqueue } = deps;
+  const { tg, me, OWNER, GROUPS, NAME, GUEST, RUN, INBOX, GUEST_INBOX, enqueue, log } = deps;
 
   async function saveAttachment(msg: Message, guest: boolean) {
     const f = msg.document ?? msg.video ?? msg.audio ?? msg.voice ?? msg.video_note ?? msg.animation ?? msg.photo?.at(-1);
@@ -43,13 +45,29 @@ export function createHandlers(deps: HandlerDeps) {
     const kind = msg.document ? "document" : msg.photo ? "photo" : msg.voice ? "voice" : msg.audio ? "audio" : "video";
     const dir = join(guest ? GUEST_INBOX : INBOX, String(msg.chat.id));
     mkdirSync(dir, { recursive: true });
+    // A planted symlink or file at the chat dir must not make the bot chmod or write elsewhere.
+    if (!lstatSync(dir).isDirectory()) throw new Error(`${dir} is not a directory.`);
     if (guest) chmodSync(dir, 0o755); // the guest reads it
     const original = msg.document?.file_name ?? msg.audio?.file_name ?? msg.animation?.file_name;
-    const tmp = join(dir, `${msg.message_id}`);
-    const remote = await tg.download(f.file_id, tmp);
+    // Claim a fresh unique name exclusively, so the download never writes through a planted link.
+    const tmp = join(dir, `${msg.message_id}.${randomBytes(8).toString("hex")}.part`);
+    closeSync(openSync(tmp, "wx", 0o600));
+    let remote: string;
+    try {
+      remote = await tg.download(f.file_id, tmp);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
     const ext = remote.includes(".") ? `.${remote.split(".").pop()}` : "";
     const path = join(dir, original ? `${msg.message_id}-${original.replace(/[^\w.-]+/g, "_")}` : `${msg.message_id}${ext}`);
-    Bun.spawnSync(["mv", tmp, path]);
+    try {
+      if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${path} is a symlink.`);
+      renameSync(tmp, path);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      throw e;
+    }
     if (guest) chmodSync(path, 0o644);
     return { path, kind, kb: Math.round(statSync(path).size / 1024) };
   }
@@ -99,7 +117,7 @@ export function createHandlers(deps: HandlerDeps) {
     }
     if (!text.trim()) return;
     if (!isPrivate) text = `${senderLabel(msg, OWNER)}: ${text.trim()}`;
-    otel.log("message", { chat, private: isPrivate, attachment: attachment?.kind });
+    log("message", { chat, private: isPrivate, attachment: attachment?.kind });
     await enqueue({ chat, prompt: replyContext(msg, me.id) + text.trim(), message: msg.message_id, isPrivate, owner: fromOwner });
   }
 
@@ -108,7 +126,7 @@ export function createHandlers(deps: HandlerDeps) {
       skip: () => console.warn(`schedule ${s.id} skipped: AGENT_GUEST_UID is not set`),
       consume: () => (fromGuest ? deps.markGuestFired(s) : deps.removeSchedule(s.id)),
       run: (owner) => {
-        otel.log("schedule fired", { id: s.id, chat: s.chat_id });
+        log("schedule fired", { id: s.id, chat: s.chat_id });
         enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
       },
     });
