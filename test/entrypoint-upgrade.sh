@@ -40,6 +40,11 @@ echo shared > guest/outbox/outside
 chmod 644 guest/outbox/outside
 chown root:root guest/outbox/outside
 ln guest/outbox/outside claude/sub/linked
+# Symlinks to an outside file at the staging names an older entrypoint used for that copy (low PIDs).
+echo planted > guest/outbox/plant
+chmod 644 guest/outbox/plant
+chown root:root guest/outbox/plant
+for n in $(seq 1 300); do ln -s /app/run/guest/outbox/plant "claude/sub/linked.unlink.$n"; done
 '
 $DOCKER run --rm -v "$VOL:/app/run" "$IMG" true
 
@@ -61,6 +66,9 @@ cd /app/run
 [ "$(stat -c %U guest/outbox/outside)" = root ] || fail "an owner-side hardlink made root change the owner of outside"
 [ "$(cat claude/sub/linked)" = shared ] || fail "the hardlinked owner file lost its content"
 [ "$(stat -c %h claude/sub/linked)" = 1 ] || fail "the owner-side hardlink survived"
+[ "$(cat guest/outbox/plant)" = planted ] || fail "root wrote through a symlink planted at a staging name"
+[ "$(stat -c %U guest/outbox/plant)" = root ] || fail "a symlink planted at a staging name made root change the owner of its target"
+[ -f claude/sub/linked ] && [ ! -L claude/sub/linked ] || fail "claude/sub/linked is no longer a regular file"
 [ "$(stat -c %U:%a claude/sub/linked)" = agent:600 ] || fail "claude/sub/linked is $(stat -c %U:%a claude/sub/linked), want agent:600"
 [ -e guest/mcp/mcp-runtime-1.json ] || [ -L guest/mcp/mcp-runtime-1.json ] && fail "the symlink in guest/mcp survived"
 [ -e guest/mcp/mcp-runtime-2.json ] && fail "the hardlink in guest/mcp survived"
