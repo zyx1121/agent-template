@@ -21,6 +21,7 @@ function setup(guest: boolean) {
   const sent: { chat: number; text: string }[] = [];
   const downloads: string[] = [];
   const turns: Turn[] = [];
+  const logs: { event: string; attrs?: object }[] = [];
   const tg = {
     send: async (chat: number, _a: unknown, text: string) => void sent.push({ chat, text }),
     download: async (id: string) => (downloads.push(id), "file.txt"),
@@ -41,8 +42,9 @@ function setup(guest: boolean) {
       writeFileSync(firedPath, JSON.stringify([...keys, guestKey(s)]));
     },
     enqueue: async (t) => void turns.push(t),
+    log: (event, attrs) => void logs.push({ event, attrs }),
   });
-  return { ...h, dir, RUN, schedulesPath, firedPath, sent, downloads, turns };
+  return { ...h, logs, dir, RUN, schedulesPath, firedPath, sent, downloads, turns };
 }
 
 const groupMsg = (from: number, text: string, extra: Partial<Message> = {}): Message => ({
@@ -125,6 +127,7 @@ test("control: the owner message enqueues with owner=true", async () => {
   expect(h.turns.length).toBe(1);
   expect(h.turns[0].owner).toBe(true);
   expect(h.sent).toEqual([]);
+  expect(h.logs).toEqual([{ event: "message", attrs: { chat: OWNER, private: true, attachment: undefined } }]);
 });
 
 test("control: a once-entry that runs is consumed from both stores", () => {
