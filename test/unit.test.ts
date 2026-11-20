@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseOwnerOnly, senderLabel, turnAllowed, turnServers } from "../src/access";
+import { parseOwnerOnly, routeMessage, routeSchedule, senderLabel, turnAllowed, turnServers } from "../src/access";
 import { asUser, classify, inDir, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
@@ -231,6 +231,38 @@ test("without a guest uid the owner is allowed and a guest is refused; with one 
   expect(turnAllowed(false, false)).toBe(false);
   expect(turnAllowed(true, true)).toBe(true);
   expect(turnAllowed(false, true)).toBe(true);
+});
+
+test("a refused guest message triggers no /new, attachment or enqueue", () => {
+  for (const cmd of [undefined, "new", "start"]) {
+    const calls: string[] = [];
+    const io = { refuse: () => calls.push("refuse"), start: () => calls.push("start"), fresh: () => calls.push("fresh"), turn: () => calls.push("turn") };
+    routeMessage(false, false, cmd, io);
+    expect(calls).toEqual(["refuse"]);
+  }
+  const calls: string[] = [];
+  const io = { refuse: () => calls.push("refuse"), start: () => calls.push("start"), fresh: () => calls.push("fresh"), turn: () => calls.push("turn") };
+  routeMessage(false, true, "new", io);
+  routeMessage(true, false, undefined, io);
+  routeMessage(true, false, "start", io);
+  expect(calls).toEqual(["fresh", "turn", "start"]);
+});
+
+test("a skipped schedule keeps its once-entry; an allowed one is consumed before it runs", () => {
+  const trace = (chat: number, once: boolean, fromGuest: boolean, hasGuest: boolean) => {
+    const calls: string[] = [];
+    routeSchedule(chat, 7, once, fromGuest, hasGuest, {
+      skip: () => calls.push("skip"),
+      consume: () => calls.push("consume"),
+      run: (owner) => calls.push(`run:${owner}`),
+    });
+    return calls;
+  };
+  expect(trace(-5, true, true, false)).toEqual(["skip"]); // group guest schedule, no guest uid
+  expect(trace(7, true, true, false)).toEqual(["skip"]); // a guest file naming the owner's chat is still a guest
+  expect(trace(7, true, false, false)).toEqual(["consume", "run:true"]);
+  expect(trace(-5, true, true, true)).toEqual(["consume", "run:false"]);
+  expect(trace(-5, false, true, true)).toEqual(["run:false"]);
 });
 
 test("readRegular returns a file of exactly max bytes, rejects one byte more and symlinks", () => {
