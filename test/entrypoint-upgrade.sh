@@ -109,3 +109,13 @@ for u in root guest; do
   case $out in *leak-me*) echo "entrypoint-upgrade: $u with no command printed the environment" >&2; exit 1 ;; esac
 done
 echo "entrypoint-upgrade: no-command ok"
+
+# A command made only of assignments: `env` would take them as variables and print the environment.
+for u in root guest; do
+  rc=0
+  out=$($DOCKER run --rm --user "$u" -e SECRET_PROBE=leak-me --entrypoint agent-entrypoint "$IMG" FOO=bar 2>&1) || rc=$?
+  [ "$rc" != 0 ] || { echo "entrypoint-upgrade: $u with an assignment-only command exited 0" >&2; exit 1; }
+  case $out in *"starts with an assignment"*) ;; *) echo "entrypoint-upgrade: $u assignment message missing" >&2; exit 1 ;; esac
+  case $out in *leak-me*) echo "entrypoint-upgrade: $u with an assignment-only command printed the environment" >&2; exit 1 ;; esac
+done
+echo "entrypoint-upgrade: assignment-command ok"
