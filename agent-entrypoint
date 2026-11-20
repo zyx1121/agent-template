@@ -87,7 +87,8 @@ for p in "$RUN"/* "$RUN"/.[!.]* "$RUN"/..?*; do
   [ -e "$p" ] || [ -L "$p" ] || continue
   [ "$p" = "$G" ] && continue
   if [ -L "$p" ]; then
-    chown -h "agent:$AG" "$p"
+    echo "agent-entrypoint: removing symlink $p" >&2
+    rm -f -- "$p"
   else
     break_links "$p" && chown -hR "agent:$AG" "$p" && chmod -R go-rwx "$p"
   fi || { echo "agent-entrypoint: could not close $p, refusing to start." >&2; exit 1; }
