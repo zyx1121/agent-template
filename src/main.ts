@@ -139,6 +139,7 @@ const { onMessage, fire } = createHandlers({
   removeSchedule: (id) => removeSchedule(SCHEDULES, id),
   markGuestFired,
   enqueue,
+  log: otel.log,
 });
 
 // ---------- Claude Code self-update ----------
