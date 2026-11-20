@@ -108,7 +108,9 @@ function mcpConfig(chat: number, owner: boolean) {
   };
   // The guest's claude reads its config itself, so it lives where the guest can.
   const path = owner ? join(RUN, `mcp-runtime-${chat}.json`) : join(GUEST_MCP, `mcp-runtime-${chat}.json`);
-  writeFileSync(path, JSON.stringify({ mcpServers: servers }));
+  // Drop whatever sits at the path and refuse to follow a link planted there ("wx" fails on an existing entry).
+  rmSync(path, { force: true });
+  writeFileSync(path, JSON.stringify({ mcpServers: servers }), { flag: "wx" });
   chmodSync(path, owner ? 0o600 : 0o644);
   return path;
 }
