@@ -39,14 +39,34 @@ cd /app/run
 echo "entrypoint-upgrade: ok"
 '
 
-# A real legacy dir that hardlinks an owner file: the file must not be copied into guest/config.
+# A 2.x guest hardlinks its own files (a local git clone does): a restart must keep them.
+$DOCKER run --rm --user guest --entrypoint sh -v "$VOL:/app/run" "$IMG" -c '
+set -eu
+cd /app/run/guest/work
+mkdir a && echo data > a/obj && ln a/obj b-obj
+'
+$DOCKER run --rm -v "$VOL:/app/run" "$IMG" true
+as_root '
+fail() { echo "entrypoint-upgrade: $1" >&2; exit 1; }
+cd /app/run/guest/work
+[ "$(cat a/obj 2>/dev/null)" = data ] || fail "the guest hardlink a/obj was removed on restart"
+[ "$(cat b-obj 2>/dev/null)" = data ] || fail "the guest hardlink b-obj was removed on restart"
+echo "entrypoint-upgrade: guest hardlinks ok"
+'
+
+# A real legacy dir that hardlinks an owner file, next to a guest/config a 1.x guest planted links in:
+# no owner file may be copied into guest/config or written through a planted link.
 as_root '
 set -eu
 cd /app/run
 rm -rf guest
-mkdir claude-guest
+mkdir -p claude-guest guest/config
 ln claude/.credentials.json claude-guest/creds
 echo mine > claude-guest/own.json
+echo guest-settings > claude-guest/settings.json
+echo guest-creds > claude-guest/.credentials.json
+ln -s /app/run/claude/settings.json guest/config/settings.json
+ln claude/.credentials.json guest/config/.credentials.json
 chown -R 1000:1000 /app/run
 '
 $DOCKER run --rm -v "$VOL:/app/run" "$IMG" true
@@ -54,8 +74,15 @@ as_root '
 fail() { echo "entrypoint-upgrade: $1" >&2; exit 1; }
 cd /app/run
 [ -e claude-guest ] && fail "claude-guest was not migrated"
+[ "$(cat claude/settings.json)" = owner ] || fail "owner settings.json was written through a planted symlink"
+[ "$(cat claude/.credentials.json)" = secret ] || fail "owner credentials were written through a planted hardlink"
+[ "$(stat -c %h claude/.credentials.json)" = 1 ] || fail "a hardlink to owner credentials survived"
 [ -e guest/config/creds ] && fail "a hardlinked owner file was copied into guest/config"
 [ "$(cat guest/config/own.json)" = mine ] || fail "guest state was not migrated"
 [ "$(stat -c %U guest/config/own.json)" = guest ] || fail "migrated guest state is not owned by guest"
+[ -L guest/config/settings.json ] && fail "the planted symlink in guest/config survived"
+[ "$(cat guest/config/settings.json)" = guest-settings ] || fail "guest settings.json was not migrated"
+[ "$(stat -c %U guest/config/settings.json)" = guest ] || fail "migrated settings.json is not owned by guest"
+[ "$(cat guest/config/.credentials.json)" = guest-creds ] || fail "guest credentials were not migrated"
 echo "entrypoint-upgrade: migration ok"
 '
