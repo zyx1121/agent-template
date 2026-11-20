@@ -50,10 +50,31 @@ fi
 drop_hardlinks "$G/config" "$G/work"
 
 # Owner state: everything in run/ but guest/ (names with two leading dots included) belongs to agent and is closed to everyone else.
+# chmod follows a symlink given on the command line, so a symlink at the top of run/ gets chown -h and no chmod.
+# chown and chmod also change the inode behind a file with a second link, which a 1.x guest could have
+# pointed at a file outside the owner tree. Break such a link first: the file keeps its content in a fresh inode.
+# The copy goes to a name mktemp creates exclusively, so a name the guest planted cannot redirect it.
+# A failure here refuses to start, because run/ goes to 711 below and an open entry would stay reachable.
+break_links() {
+  find "$1" ! -type d -links +1 -exec sh -c '
+    for f; do
+      echo "agent-entrypoint: breaking the extra link of $f" >&2
+      if [ -f "$f" ] && [ ! -L "$f" ]; then
+        t=$(mktemp -- "$f.XXXXXX") || exit 1
+        cp -p -- "$f" "$t" && mv -f -- "$t" "$f" || { rm -f -- "$t"; exit 1; }
+      else
+        rm -f -- "$f" || exit 1
+      fi
+    done' sh {} +
+}
 for p in "$RUN"/* "$RUN"/.[!.]* "$RUN"/..?*; do
-  [ -e "$p" ] || continue
+  [ -e "$p" ] || [ -L "$p" ] || continue
   [ "$p" = "$G" ] && continue
-  chown -R "agent:$AG" "$p" && chmod -R go-rwx "$p" || echo "agent-entrypoint: could not close $p" >&2
+  if [ -L "$p" ]; then
+    chown -h "agent:$AG" "$p"
+  else
+    break_links "$p" && chown -hR "agent:$AG" "$p" && chmod -R go-rwx "$p"
+  fi || { echo "agent-entrypoint: could not close $p, refusing to start." >&2; exit 1; }
 done
 chown -h "agent:$AG" "$RUN" "$G"
 chmod 711 "$RUN" "$G"

@@ -29,6 +29,22 @@ chown -R 1000:1000 /app/run
 echo dots > ..x
 chown root:root ..x
 chmod 644 ..x
+# A two-dot symlink to a file outside the owner tree, and an owner file hardlinked to a file outside it.
+# guest/outbox is not recursed into by the owner loop, so it holds the outside files.
+mkdir -p guest/outbox claude/sub
+echo target > guest/outbox/tgt
+chmod 644 guest/outbox/tgt
+chown root:root guest/outbox/tgt
+ln -s guest/outbox/tgt ..l
+echo shared > guest/outbox/outside
+chmod 644 guest/outbox/outside
+chown root:root guest/outbox/outside
+ln guest/outbox/outside claude/sub/linked
+# Symlinks to an outside file at the staging names an older entrypoint used for that copy (low PIDs).
+echo planted > guest/outbox/plant
+chmod 644 guest/outbox/plant
+chown root:root guest/outbox/plant
+for n in $(seq 1 300); do ln -s /app/run/guest/outbox/plant "claude/sub/linked.unlink.$n"; done
 '
 $DOCKER run --rm -v "$VOL:/app/run" "$IMG" true
 
@@ -42,6 +58,18 @@ cd /app/run
 [ -d guest/sched ] || fail "guest/sched was not recreated as a directory"
 [ "$(stat -c %a claude)" = 700 ] || fail "claude dir mode is $(stat -c %a claude)"
 [ "$(stat -c %U:%a ..x)" = agent:600 ] || fail "run/..x is $(stat -c %U:%a ..x), want agent:600"
+[ "$(stat -c %a guest/outbox/tgt)" = 644 ] || fail "the symlink run/..l made root change the mode of its target to $(stat -c %a guest/outbox/tgt)"
+[ "$(stat -c %U:%G guest/outbox/tgt)" = root:root ] || fail "the symlink run/..l made root change the owner of its target"
+[ -L ..l ] || fail "run/..l is no longer a symlink"
+[ "$(stat -c %U ..l)" = agent ] || fail "the symlink run/..l is owned by $(stat -c %U ..l), want agent"
+[ "$(stat -c %a guest/outbox/outside)" = 644 ] || fail "an owner-side hardlink made root change the mode of outside to $(stat -c %a guest/outbox/outside)"
+[ "$(stat -c %U guest/outbox/outside)" = root ] || fail "an owner-side hardlink made root change the owner of outside"
+[ "$(cat claude/sub/linked)" = shared ] || fail "the hardlinked owner file lost its content"
+[ "$(stat -c %h claude/sub/linked)" = 1 ] || fail "the owner-side hardlink survived"
+[ "$(cat guest/outbox/plant)" = planted ] || fail "root wrote through a symlink planted at a staging name"
+[ "$(stat -c %U guest/outbox/plant)" = root ] || fail "a symlink planted at a staging name made root change the owner of its target"
+[ -f claude/sub/linked ] && [ ! -L claude/sub/linked ] || fail "claude/sub/linked is no longer a regular file"
+[ "$(stat -c %U:%a claude/sub/linked)" = agent:600 ] || fail "claude/sub/linked is $(stat -c %U:%a claude/sub/linked), want agent:600"
 [ -e guest/mcp/mcp-runtime-1.json ] || [ -L guest/mcp/mcp-runtime-1.json ] && fail "the symlink in guest/mcp survived"
 [ -e guest/mcp/mcp-runtime-2.json ] && fail "the hardlink in guest/mcp survived"
 [ "$(cat claude/settings.json)" = owner ] || fail "owner settings.json changed"
