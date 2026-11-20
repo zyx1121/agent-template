@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { asUser, classify, guestEnv, runTurn, uidPids, withUmask022 } from "../src/claude";
+import { asUser, classify, guestEnv, KILL_GRACE_MS, runTurn, TurnError, uidPids, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
 import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
@@ -208,3 +208,14 @@ test("a turn ends when claude exits even if a detached child still holds its std
   expect(r.reply).toBe("ok");
   expect(ms).toBeLessThan(5_000);
 });
+
+test("a timed-out turn ends even if claude stopped itself, which ignores SIGINT", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "turn-"));
+  const fake = join(dir, "claude");
+  writeFileSync(fake, `#!/bin/sh\ncat >/dev/null\nkill -STOP $$\necho '{"type":"result","result":"ok"}'\n`);
+  chmodSync(fake, 0o755);
+  const t0 = Date.now();
+  const r = runTurn({ claude: fake, cwd: dir, prompt: "p", systemPrompt: "s", mcpConfig: "m", timeoutMs: 300, env: {} });
+  await expect(r).rejects.toBeInstanceOf(TurnError);
+  expect(Date.now() - t0).toBeLessThan(300 + KILL_GRACE_MS + 2_000);
+}, 10_000);

@@ -1,7 +1,7 @@
 // Run inside the built image (see .github/workflows/ci.yml): checks what the entrypoint hands the bot.
 // A guest turn must start from run/guest/work, run as the guest uid, and leave files the bot can read.
 import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { asUser, stopUser } from "../src/claude";
+import { asUser, runTurn, stopUser } from "../src/claude";
 
 const fail = (m: string) => {
   console.error(`guest-smoke: ${m}`);
@@ -78,4 +78,15 @@ for (let i = 0; i < 40; i++) {
   await Bun.sleep(300); // a scan of guestPids can miss a hopping chain too, so watch what it appends
   if (statSync(`${work}/hop.beat`).size !== beat || guestPids().length) fail(`a hop chain survived stopUser in round ${i}`);
 }
+
+// A guest can SIGSTOP its own claude, which then ignores the timeout's SIGINT: the turn must still end.
+put("stopped-claude", `#!/bin/sh\ncat >/dev/null\nsetsid sh -c "sleep 0.5; kill -STOP $$" </dev/null >/dev/null 2>&1 &\nsleep 30\n`);
+chmodSync(`${work}/stopped-claude`, 0o755);
+const t0 = Date.now();
+const stopped = await runTurn({ claude: `${work}/stopped-claude`, cwd: work, prompt: "p", systemPrompt: "s", mcpConfig: "m",
+  timeoutMs: 1000, env: { PATH: process.env.PATH ?? "" }, isolate: guest }).then(() => "returned", () => "threw");
+if (stopped !== "threw") fail("a stopped guest claude did not fail its turn");
+if (Date.now() - t0 > 8000) fail(`a stopped guest claude held its turn for ${Date.now() - t0} ms`);
+await Bun.sleep(200);
+if (guestPids().length) fail(`guest processes survived a stopped turn: ${guestPids().join(" ")}`);
 console.log("guest-smoke: ok");

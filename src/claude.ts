@@ -124,6 +124,8 @@ export async function stopUser(u: { uid: number; gid: number }, rounds = 20): Pr
 
 /** After the child exits, how long its pipes may stay open before the turn stops reading them. */
 const PIPE_GRACE_MS = 500;
+/** After a timeout or stop sends SIGINT, how long the child has to exit before it gets SIGKILL. */
+export const KILL_GRACE_MS = 3000;
 
 /** Read a stream until it ends or `stop` settles: a process the child left behind can hold the pipe open forever. */
 async function readUntil(s: ReadableStream<Uint8Array>, stop: Promise<unknown>, on: (b: Uint8Array) => void) {
@@ -153,7 +155,16 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
     cwd: o.cwd,
     env: o.isolate ? o.env : { ...process.env, ...o.env },
     stdin: new Blob([o.prompt]), stdout: "pipe", stderr: "pipe" });
-  const kill = () => p.kill("SIGINT");
+  // A stopped process does not act on SIGINT, and a guest's Bash can SIGSTOP its own claude (same uid),
+  // so escalate to SIGKILL, and for a guest turn stop every process of the uid from the bot's side.
+  let killer: ReturnType<typeof setTimeout> | undefined;
+  const kill = () => {
+    p.kill("SIGINT");
+    killer ??= setTimeout(() => {
+      p.kill("SIGKILL");
+      if (o.isolate) void stopUser(o.isolate);
+    }, KILL_GRACE_MS);
+  };
   const timer = setTimeout(kill, o.timeoutMs);
   o.signal?.addEventListener("abort", kill);
 
@@ -198,6 +209,7 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
   await errRead;
   const code = await p.exited;
   clearTimeout(timer);
+  clearTimeout(killer);
   if (o.signal?.aborted) throw new TurnError("Stopped.", "error");
   if (code !== 0 || !result || result.is_error) {
     const message = (result?.result || stderr.trim() || `claude exited ${code}`).slice(0, 500);
