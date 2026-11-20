@@ -106,6 +106,8 @@ export function readRegular(path: string, max = 50 * 1024 * 1024): Buffer | unde
   }
 }
 
+const short = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max;
+
 /** Identifies a guest schedule across rewrites by the guest, for the bot's record of fired once-entries. */
 export const guestKey = (s: Schedule) => `${s.id}@${s.created_at}`;
 
@@ -123,13 +125,14 @@ export function guestSchedules(path: string, groups: Set<number>, fired: Set<str
   return (schedules as Schedule[]).filter(
     (s): s is Schedule =>
       Boolean(s) &&
-      typeof s.id === "string" &&
-      typeof s.cron === "string" &&
-      typeof s.prompt === "string" &&
+      short(s.id, 64) &&
+      short(s.cron, 128) &&
+      short(s.prompt, 16 * 1024) &&
+      short(s.created_at, 64) &&
       Number.isInteger(s.chat_id) &&
       s.chat_id < 0 &&
       groups.has(s.chat_id) &&
       s.enabled === true &&
       !fired.has(guestKey(s)),
-  ).map((s) => ({ ...s, note: typeof s.note === "string" ? s.note : "", once: s.once === true }));
+  ).map((s) => ({ ...s, note: short(s.note, 1024) ? s.note : "", once: s.once === true }));
 }

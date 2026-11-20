@@ -63,9 +63,18 @@ export const asUser = (args: string[], u: { uid: number; gid: number }) => [
   "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", ...withUmask022(args),
 ];
 
+/**
+ * Stop every process of a uid, so nothing a guest turn left running (`setsid ... &`) can watch later
+ * turns through /proc. The shell runs as that uid and kill(-1) spares only itself.
+ */
+export async function stopUser(u: { uid: number; gid: number }) {
+  await Bun.spawn(asUser(["sh", "-c", "kill -KILL -1 2>/dev/null; true"], u), { env: { PATH: process.env.PATH ?? "" }, stdout: "ignore", stderr: "ignore" }).exited;
+}
+
 export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<TurnResult> {
   const args = [
-    o.claude, "-p", o.prompt,
+    // The prompt goes over stdin, not argv: argv is visible to every uid in /proc/<pid>/cmdline.
+    o.claude, "-p",
     "--output-format", "stream-json", "--include-partial-messages", "--verbose",
     "--permission-mode", "bypassPermissions",
     "--append-system-prompt", o.systemPrompt,
@@ -77,7 +86,7 @@ export async function runTurn(o: TurnOptions, ev: TurnEvents = {}): Promise<Turn
   const p = Bun.spawn(o.isolate ? asUser(args, o.isolate) : args, {
     cwd: o.cwd,
     env: o.isolate ? o.env : { ...process.env, ...o.env },
-    stdout: "pipe", stderr: "pipe" });
+    stdin: new Blob([o.prompt]), stdout: "pipe", stderr: "pipe" });
   const kill = () => p.kill("SIGINT");
   const timer = setTimeout(kill, o.timeoutMs);
   o.signal?.addEventListener("abort", kill);

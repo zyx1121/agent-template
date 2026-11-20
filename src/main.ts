@@ -5,7 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "./access";
-import { guestEnv, isStaleSession, runTurn, TurnError } from "./claude";
+import { guestEnv, isStaleSession, runTurn, stopUser, TurnError } from "./claude";
 import { cronMatches } from "./cron";
 import { Draft } from "./draft";
 import * as otel from "./otel";
@@ -243,12 +243,16 @@ async function turnWithResume(t: Turn, events: Parameters<typeof runTurn>[1], si
       events,
     );
   let result;
+  // No guest process may outlive its turn or see the next one: stop them before and after every turn.
+  if (GUEST) await stopUser(GUEST);
   try {
     result = await run(resume);
   } catch (e) {
     if (!resume || !isStaleSession(e)) throw e;
     console.warn(`session ${resume} could not be resumed, starting fresh`);
     result = await run(undefined);
+  } finally {
+    if (GUEST) await stopUser(GUEST);
   }
   if (result.sessionId) writeFileSync(file, result.sessionId);
   return result;
@@ -338,6 +342,16 @@ async function onMessage(msg: Message) {
 let lastMinute = Math.floor(Date.now() / 60_000);
 
 function tick() {
+  // A tick runs from setInterval: anything it throws would end the bot, owner chats included.
+  try {
+    tickMinutes();
+  } catch (e) {
+    console.error(e);
+    otel.log(`schedule tick failed: ${(e as Error).message ?? e}`, {}, "ERROR");
+  }
+}
+
+function tickMinutes() {
   const nowMinute = Math.floor(Date.now() / 60_000);
   const from = Math.max(lastMinute + 1, nowMinute - 4);
   lastMinute = nowMinute;

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseOwnerOnly, senderLabel, turnServers } from "../src/access";
-import { asUser, classify, guestEnv, withUmask022 } from "../src/claude";
+import { asUser, classify, guestEnv, runTurn, withUmask022 } from "../src/claude";
 import { cronMatches, validateCron } from "../src/cron";
 import { addressed, isNoReply, replyContext, scheduledPrompt, toolLine } from "../src/prompts";
 import { addSchedule, editSchedule, guestKey, guestSchedules, listSchedules, removeSchedule } from "../src/schedules";
@@ -119,6 +119,30 @@ test("schedules a guest wrote are data: only well-formed entries for allowed gro
   );
   expect(guestSchedules(file, new Set([-5])).map((s) => s.id)).toEqual(["a"]);
   expect(guestSchedules(join(tmpdir(), "missing-guest.json"), new Set([-5]))).toEqual([]);
+});
+
+test("a guest entry with a non-string or oversized field is dropped instead of crashing the tick", () => {
+  const file = join(mkdtempSync(join(tmpdir(), "guest-")), "schedules.json");
+  const ok = { id: "a", cron: "* * * * *", prompt: "p", chat_id: -5, note: "n", enabled: true, once: true, created_at: "t" };
+  writeFileSync(
+    file,
+    JSON.stringify({
+      schedules: [ok, { ...ok, id: "obj", created_at: { toString: 0 } }, { ...ok, id: "none", created_at: undefined }, { ...ok, id: "x".repeat(65) }, { ...ok, id: "big", prompt: "p".repeat(16 * 1024 + 1) }],
+    }),
+  );
+  const got = guestSchedules(file, new Set([-5]));
+  expect(got.map((s) => s.id)).toEqual(["a"]);
+  expect(() => got.map(guestKey)).not.toThrow();
+});
+
+test("the prompt reaches claude over stdin, not argv (argv is readable by every uid in /proc)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "turn-"));
+  const fake = join(dir, "claude");
+  writeFileSync(fake, `#!/bin/sh\necho "$*" > "${dir}/argv"\nprintf '{"type":"result","result":"%s"}\\n' "$(cat)"\n`);
+  chmodSync(fake, 0o755);
+  const r = await runTurn({ claude: fake, cwd: dir, prompt: "SECRET-PROMPT", systemPrompt: "s", mcpConfig: "m", timeoutMs: 10_000, env: {} });
+  expect(r.reply).toBe("SECRET-PROMPT");
+  expect(readFileSync(join(dir, "argv"), "utf8")).not.toContain("SECRET-PROMPT");
 });
 
 test("the bot reads guest schedules without following links or blocking on a FIFO, and skips fired ones", () => {
