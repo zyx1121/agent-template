@@ -10,6 +10,7 @@ import { cronMatches } from "./cron";
 import { Draft } from "./draft";
 import * as otel from "./otel";
 import { createHandlers, sessionFile, type Turn } from "./handlers";
+import { clearOutbox } from "./outbox";
 import { isNoReply, systemNote, toolLine } from "./prompts";
 import { guestKey, guestSchedules, listSchedules, readRegular, removeSchedule, type Schedule } from "./schedules";
 import { quote, Telegram, type Update } from "./telegram";
@@ -163,7 +164,10 @@ async function serve(t: Turn) {
   const { chat, message, scheduled, isPrivate } = t;
   if (message) tg.react(chat, message, ACKS[Math.floor(Math.random() * ACKS.length)]);
   const outbox = t.owner ? OUTBOX : GUEST_OUTBOX;
-  for (const f of readdirSync(outbox)) rmSync(join(outbox, f), { recursive: true, force: true });
+  clearOutbox(outbox, (m) => {
+    console.warn(m);
+    otel.log(m, {}, "WARN");
+  });
 
   // Private chats stream an animated draft; groups get one progress message edited in place.
   const abort = new AbortController();
@@ -285,7 +289,12 @@ function errorReply(err: TurnError, scheduled: boolean): [string, boolean] {
 async function deliverOutbox(chat: number, dir: string, guest: boolean) {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (!lstatSync(path).isFile()) continue;
+    try {
+      if (!lstatSync(path).isFile()) continue;
+    } catch (e) {
+      console.warn(`outbox: skipping ${name}: ${(e as Error).message ?? e}`);
+      continue;
+    }
     const bytes = guest ? readRegular(path) : undefined;
     if (guest && !bytes) continue;
     await tg.sendFile(chat, undefined, path, bytes).then(
