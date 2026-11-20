@@ -3,7 +3,6 @@
 import { chmodSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { routeMessage, routeSchedule, senderLabel } from "./access";
-import * as otel from "./otel";
 import { addressed, replyContext, scheduledPrompt, stripMention } from "./prompts";
 import type { Schedule } from "./schedules";
 import { parseCommand, quote, type Message, type Telegram } from "./telegram";
@@ -31,10 +30,12 @@ export type HandlerDeps = {
   /** Remembers a fired guest once-entry. */
   markGuestFired(s: Schedule): void;
   enqueue(t: Turn): Promise<unknown>;
+  /** Telemetry sink, `otel.log` in production. Injected so importing this module starts no exporter. */
+  log(event: string, attrs?: Record<string, string | number | boolean | undefined>): void;
 };
 
 export function createHandlers(deps: HandlerDeps) {
-  const { tg, me, OWNER, GROUPS, NAME, GUEST, RUN, INBOX, GUEST_INBOX, enqueue } = deps;
+  const { tg, me, OWNER, GROUPS, NAME, GUEST, RUN, INBOX, GUEST_INBOX, enqueue, log } = deps;
 
   async function saveAttachment(msg: Message, guest: boolean) {
     const f = msg.document ?? msg.video ?? msg.audio ?? msg.voice ?? msg.video_note ?? msg.animation ?? msg.photo?.at(-1);
@@ -99,7 +100,7 @@ export function createHandlers(deps: HandlerDeps) {
     }
     if (!text.trim()) return;
     if (!isPrivate) text = `${senderLabel(msg, OWNER)}: ${text.trim()}`;
-    otel.log("message", { chat, private: isPrivate, attachment: attachment?.kind });
+    log("message", { chat, private: isPrivate, attachment: attachment?.kind });
     await enqueue({ chat, prompt: replyContext(msg, me.id) + text.trim(), message: msg.message_id, isPrivate, owner: fromOwner });
   }
 
@@ -108,7 +109,7 @@ export function createHandlers(deps: HandlerDeps) {
       skip: () => console.warn(`schedule ${s.id} skipped: AGENT_GUEST_UID is not set`),
       consume: () => (fromGuest ? deps.markGuestFired(s) : deps.removeSchedule(s.id)),
       run: (owner) => {
-        otel.log("schedule fired", { id: s.id, chat: s.chat_id });
+        log("schedule fired", { id: s.id, chat: s.chat_id });
         enqueue({ chat: s.chat_id, prompt: scheduledPrompt(s, at), scheduled: true, isPrivate: s.chat_id > 0, owner }).catch(console.error);
       },
     });
