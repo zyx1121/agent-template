@@ -2,7 +2,7 @@
 // Same schema as the Python template, so an existing bot keeps its schedules.
 // Writes go through a lock directory and an atomic rename, so a reader never sees half a file.
 
-import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export type Schedule = {
@@ -99,7 +99,18 @@ export function readRegular(path: string, max = 50 * 1024 * 1024): Buffer | unde
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const st = fstatSync(fd);
-    if (st.isFile() && st.size <= max) return readFileSync(fd);
+    if (!st.isFile() || st.size > max) return;
+    // A writer can keep appending after the size check, so read at most max + 1 bytes and reject anything longer.
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= max) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, max + 1 - total));
+      const n = readSync(fd, chunk, 0, chunk.length, null);
+      if (n === 0) break;
+      chunks.push(chunk.subarray(0, n));
+      total += n;
+    }
+    if (total <= max) return Buffer.concat(chunks, total);
   } catch {}
   finally {
     if (fd !== undefined) closeSync(fd);
