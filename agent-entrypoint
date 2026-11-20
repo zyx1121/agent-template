@@ -10,14 +10,20 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 RUN=/app/run
 
 # With no command, `env` below would print the whole environment, tokens included, to the log.
-# A first argument with `=` is an assignment to `env`, so a command made only of those leaks the same way.
+# `env` takes leading NAME=value words as assignments, so a command made only of those leaks the same way.
+# The messages never echo an argument: an assignment can carry a token.
 if [ "$#" -eq 0 ]; then
   echo "agent-entrypoint: no command given, refusing to start." >&2
   exit 1
 fi
-case $1 in
-  *=*) echo "agent-entrypoint: the command starts with an assignment ($1), refusing to start." >&2; exit 1 ;;
-esac
+has_program=
+for a; do
+  case $a in *=*) ;; *) has_program=1; break ;; esac
+done
+if [ -z "$has_program" ]; then
+  echo "agent-entrypoint: the command has only assignments and no program, refusing to start." >&2
+  exit 1
+fi
 
 if [ "$(id -u)" != 0 ]; then
   echo "agent-entrypoint: not started as root, so guest turns cannot get their own uid and share the bot's." >&2
