@@ -11,7 +11,7 @@ const MEMBER = 2;
 const GROUP = -100;
 const BOT = { id: 99, username: "testbot" };
 
-function setup(guest: boolean) {
+function setup(guest: boolean, download?: (id: string, dest: string) => Promise<string>) {
   const dir = mkdtempSync(join(tmpdir(), "handlers-"));
   const RUN = join(dir, "run");
   const INBOX = join(dir, "inbox");
@@ -24,7 +24,7 @@ function setup(guest: boolean) {
   const logs: { event: string; attrs?: object }[] = [];
   const tg = {
     send: async (chat: number, _a: unknown, text: string) => void sent.push({ chat, text }),
-    download: async (id: string) => (downloads.push(id), "file.txt"),
+    download: async (id: string, dest: string) => (downloads.push(id), download ? download(id, dest) : "file.txt"),
   };
   const h = createHandlers({
     tg: tg as any,
@@ -172,4 +172,26 @@ test("guest attachment: a symlink planted at the final path is not written throu
   expect(h.turns).toEqual([]);
   expect(readFileSync(victim, "utf8")).toBe("keep");
   expect(readdirSync(dir)).toEqual(["10-a.txt"]); // no .part left behind
+});
+
+test("guest attachment: the downloaded bytes land at the final name with mode 0644 and no .part is left", async () => {
+  const { readdirSync, statSync } = await import("node:fs");
+  const h = setup(true, async (_id, dest) => (writeFileSync(dest, "hello"), "file.txt"));
+  await h.onMessage(docMsg());
+  const dir = join(h.dir, "guest-inbox", String(GROUP));
+  expect(readdirSync(dir)).toEqual(["10-a.txt"]);
+  expect(readFileSync(join(dir, "10-a.txt"), "utf8")).toBe("hello");
+  expect(statSync(join(dir, "10-a.txt")).mode & 0o777).toBe(0o644);
+  expect(h.turns.length).toBe(1);
+});
+
+test("guest attachment: a partial download that throws leaves no .part file", async () => {
+  const { readdirSync } = await import("node:fs");
+  const h = setup(true, async (_id, dest) => {
+    writeFileSync(dest, "par");
+    throw new Error("connection reset");
+  });
+  await h.onMessage(docMsg());
+  expect(h.turns).toEqual([]);
+  expect(readdirSync(join(h.dir, "guest-inbox", String(GROUP)))).toEqual([]);
 });
