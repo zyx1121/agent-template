@@ -62,7 +62,10 @@ export function createHandlers(deps: HandlerDeps) {
     const ext = remote.includes(".") ? `.${remote.split(".").pop()}` : "";
     const path = join(dir, original ? `${msg.message_id}-${original.replace(/[^\w.-]+/g, "_")}` : `${msg.message_id}${ext}`);
     try {
-      if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${path} is a symlink.`);
+      const left = lstatSync(path, { throwIfNoEntry: false });
+      if (left?.isSymbolicLink()) throw new Error(`${path} is a symlink.`);
+      // Refuse a leftover directory so the download is never moved into it.
+      if (left?.isDirectory()) throw new Error(`${path} is a directory.`);
       renameSync(tmp, path);
     } catch (e) {
       rmSync(tmp, { force: true });

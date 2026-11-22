@@ -174,6 +174,18 @@ test("guest attachment: a symlink planted at the final path is not written throu
   expect(readdirSync(dir)).toEqual(["10-a.txt"]); // no .part left behind
 });
 
+test("guest attachment: a directory left at the final path is refused and no .part is left", async () => {
+  const h = setup(true);
+  const { mkdirSync, readdirSync } = await import("node:fs");
+  const dir = join(h.dir, "guest-inbox", String(GROUP));
+  mkdirSync(join(dir, "10-a.txt"), { recursive: true });
+  await h.onMessage(docMsg());
+  expect(h.sent.at(-1)?.text).toContain("is a directory");
+  expect(h.turns).toEqual([]);
+  expect(readdirSync(dir)).toEqual(["10-a.txt"]);
+  expect(readdirSync(join(dir, "10-a.txt"))).toEqual([]);
+});
+
 test("guest attachment: the downloaded bytes land at the final name with mode 0644 and no .part is left", async () => {
   const { readdirSync, statSync } = await import("node:fs");
   const h = setup(true, async (_id, dest) => (writeFileSync(dest, "hello"), "file.txt"));
