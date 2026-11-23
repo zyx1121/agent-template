@@ -70,6 +70,7 @@ fail() { echo "entrypoint-upgrade: $1" >&2; exit 1; }
 cd /app/run
 [ "$(stat -c %U claude/settings.json)" = agent ] || fail "owner settings.json is owned by $(stat -c %U claude/settings.json)"
 [ "$(stat -c %h claude/settings.json)" = 1 ] || fail "the hardlink to owner settings.json survived"
+[ "$(stat -c %a claude/settings.json)" = 600 ] || fail "owner settings.json mode is $(stat -c %a claude/settings.json), want 600"
 [ -e guest/work/x ] && fail "guest/work/x was not removed"
 [ -L guest/sched ] && fail "guest/sched is still a symlink"
 [ -d guest/sched ] || fail "guest/sched was not recreated as a directory"
